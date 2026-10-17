@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 20
     DB_POOL_TIMEOUT: int = 30
 
+    # Ingestion & Storage Settings
+    UPLOAD_DIR: str = "storage/uploads"
+    MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10MB
+    ALLOWED_EXTENSIONS: list[str] = [".pdf", ".md", ".txt", ".py"]
+
 
 @lru_cache
 def get_settings() -> Settings:

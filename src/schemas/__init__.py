@@ -11,6 +11,7 @@ from src.schemas.document import (
     DocumentCreate,
     DocumentRead,
     DocumentUpdate,
+    DocumentUploadResponse,
 )
 from src.schemas.processing_job import (
     JobStatus,
@@ -39,6 +40,7 @@ __all__ = [
     "DocumentCreate",
     "DocumentUpdate",
     "DocumentRead",
+    "DocumentUploadResponse",
     "JobStatus",
     "ProcessingJobBase",
     "ProcessingJobCreate",

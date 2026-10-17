@@ -37,3 +37,11 @@ class DocumentRead(DocumentBase, TimestampSchema):
 
     id: UUID
     project_id: UUID
+
+
+class DocumentUploadResponse(DocumentRead):
+    """Schema returned after a successful multipart file upload and job enqueue."""
+
+    job_id: UUID = Field(..., description="ID of the enqueued background processing job")
+    job_status: str = Field(default="PENDING", description="Status of the background processing job")
+

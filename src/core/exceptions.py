@@ -30,3 +30,24 @@ class EntityConflictError(DevPilotException):
             message=f"{entity_name} conflict: {conflict_reason}",
             details={"entity_name": entity_name, "conflict_reason": conflict_reason},
         )
+
+
+class UnsupportedFileExtensionError(DevPilotException):
+    """Raised when an uploaded file extension is not supported."""
+
+    def __init__(self, extension: str, allowed: list[str]):
+        super().__init__(
+            message=f"File extension '{extension}' is not supported. Allowed extensions: {', '.join(allowed)}",
+            details={"extension": extension, "allowed_extensions": allowed},
+        )
+
+
+class FileTooLargeError(DevPilotException):
+    """Raised when an uploaded file exceeds the maximum allowed size."""
+
+    def __init__(self, size_bytes: int, max_bytes: int):
+        super().__init__(
+            message=f"File size of {size_bytes} bytes exceeds the maximum allowed limit of {max_bytes} bytes.",
+            details={"size_bytes": size_bytes, "max_bytes": max_bytes},
+        )
+

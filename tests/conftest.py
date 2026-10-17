@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
-from src.core.database import get_db
+from src.core.database import get_db, get_session_factory
 from src.main import app
 from src.models.base import Base
 
@@ -76,6 +76,7 @@ async def client(test_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
                 await session.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_session_factory] = lambda: session_factory
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:

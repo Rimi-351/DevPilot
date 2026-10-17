@@ -10,7 +10,12 @@ from fastapi.responses import JSONResponse
 from src.api.v1.api import api_router
 from src.core.config import settings
 from src.core.database import engine
-from src.core.exceptions import DevPilotException, EntityNotFoundError
+from src.core.exceptions import (
+    DevPilotException,
+    EntityNotFoundError,
+    FileTooLargeError,
+    UnsupportedFileExtensionError,
+)
 
 
 @asynccontextmanager
@@ -43,11 +48,26 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Global Exception Handlers
     @app.exception_handler(EntityNotFoundError)
     async def entity_not_found_handler(request: Request, exc: EntityNotFoundError) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
+            content={"detail": exc.message, "details": exc.details},
+        )
+
+    @app.exception_handler(FileTooLargeError)
+    async def file_too_large_handler(request: Request, exc: FileTooLargeError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            content={"detail": exc.message, "details": exc.details},
+        )
+
+    @app.exception_handler(UnsupportedFileExtensionError)
+    async def unsupported_extension_handler(
+        request: Request, exc: UnsupportedFileExtensionError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
             content={"detail": exc.message, "details": exc.details},
         )
 

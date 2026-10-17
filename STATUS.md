@@ -1,62 +1,72 @@
 # DevPilot Project Status
 
-**Current Target:** Week 1 — Backend Foundation  
+**Current Target:** Week 2 — Document Ingestion Pipeline  
 **Status:** Completed  
-**Last Verified:** With `pytest` (15/15 integration tests passing)  
+**Last Verified:** With `pytest` (22/22 integration tests passing, 0 warnings)  
 
 ---
 
-## Completed Deliverables (Week 1)
+## Completed Deliverables
 
-### 1. Modular Application Architecture
-- Scaffolding of core directories:
-  - `src/core/`: Application settings via `pydantic-settings`, SQLAlchemy 2.0 async engine and sessionmaker with connection pooling, and domain exceptions.
-  - `src/models/`: Declarative ORM models built with modern SQLAlchemy 2.0 `Mapped` and `mapped_column` type annotations.
-  - `src/schemas/`: Pydantic v2 schemas using `ConfigDict(from_attributes=True)` and strict validations.
-  - `src/api/v1/`: Versioned API router structure isolating business endpoints.
-- Main entrypoint `src/main.py` with asynchronous lifespan manager and global exception handlers.
+### Week 2 — Document Ingestion Pipeline (Completed)
 
-### 2. Async Database Infrastructure (SQLAlchemy 2.0 & PostgreSQL)
-- Asynchronous session management with `async_sessionmaker(expire_on_commit=False)` and resilient connection pool configurations (`pool_pre_ping=True`).
-- `get_db` dependency providing scoped transaction management with automatic rollback on unhandled exceptions.
-- Alembic configuration (`alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`) wired for async migrations using `Base.metadata`.
+1. **Ingestion & Storage Dependencies**
+   - Added `python-multipart`, `pypdf`, and `aiofiles` to `requirements.txt` and `pyproject.toml`.
+   - Installed into isolated `.venv` environment.
 
-### 3. Initial Domain Models
-- **`Project`** (`src/models/project.py`):
-  - UUID primary key, timezone-aware `created_at` and `updated_at` timestamps.
-  - Indexed `name`, optional `description`.
-  - Cascading one-to-many relationships to `Document` and `ProcessingJob`.
-- **`Document`** (`src/models/document.py`):
-  - UUID primary key, foreign key link to `Project` (`ondelete="CASCADE"`).
-  - Storage location (`file_path`), MIME type (`file_type`), file size (`file_size_bytes`).
-  - Cascading one-to-many relationship to `ProcessingJob`.
-- **`ProcessingJob`** (`src/models/processing_job.py`):
-  - State machine tracking via `JobStatus` enum (`PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED`, `CANCELLED`).
-  - Associated `project_id` and optional `document_id`.
-  - JSON payload input and result output containers, error message logging.
+2. **Local Storage Service (`src/services/storage.py`)**
+   - Implemented asynchronous `LocalStorageService`.
+   - File extension validation (`.pdf`, `.md`, `.txt`, `.py`) and size constraint checks (max 10MB configurable via `Settings`).
+   - Content hashing via hexadecimal SHA-256 to ensure idempotent naming and collision avoidance (`storage/uploads/{hash}{ext}`).
+   - Verified existence of `storage/uploads/.gitkeep`.
 
-### 4. Pydantic v2 Schemas & Validation
-- Standardized `PaginationParams` and generic `PaginatedResponse[T]`.
-- Strict request models (`ProjectCreate`, `ProjectUpdate`, `DocumentCreate`, `DocumentUpdate`, `ProcessingJobCreate`, `ProcessingJobUpdate`).
-- Response models (`ProjectRead`, `DocumentRead`, `ProcessingJobRead`) with automatic ORM conversion.
+3. **Text Extraction & Chunking Services (`src/services/extractor.py` & `src/services/chunker.py`)**
+   - Multi-format text extraction supporting UTF-8 source code (`.py`), Markdown (`.md`), plain text (`.txt`), and page-by-page PDF extraction using `pypdf`.
+   - Sliding-window text chunker (`chunk_text`) with configurable `chunk_size` (default 500 characters) and `chunk_overlap` (default 50 characters).
+   - Character offset tracking (`start_offset`, `end_offset`, `index`) returning discrete `TextChunk` records.
 
-### 5. Integration Test Suite (`tests/`)
-- Pytest integration suite using `pytest-asyncio` and `httpx.AsyncClient` with `ASGITransport`.
-- Isolated in-memory async SQLite engine fixture overriding `get_db` dependency without mocking API logic.
-- 100% test pass rate across 15 tests:
-  - `tests/test_health.py` (2 tests: root and health probe)
-  - `tests/test_projects.py` (6 tests: full CRUD, pagination, 404 handling, 422 validation)
-  - `tests/test_documents.py` (4 tests: creation, project FK validation, filtering, deletion)
-  - `tests/test_jobs.py` (3 tests: job status lifecycle, project FK validation, status filtering)
+4. **Multipart File Ingestion Endpoint & Background Task Lifecycle**
+   - Implemented `POST /api/v1/documents/upload` accepting multipart file binaries and `project_id`.
+   - Automatic database registration of `Document` record with file size, storage URI, and MIME type.
+   - Enqueued `ProcessingJob` with status `PENDING`.
+   - Dispatched asynchronous FastAPI `BackgroundTask` (`process_document_background`) that transitions `ProcessingJob` to `IN_PROGRESS`, extracts text, chunks content, and transitions to `COMPLETED` (logging chunk count and total characters) or `FAILED` on error.
+   - Specific exception handlers returning HTTP 413 for oversized files (`FileTooLargeError`) and HTTP 400 for unsupported formats (`UnsupportedFileExtensionError`).
+
+5. **Pytest Integration Coverage (`tests/test_ingestion.py`)**
+   - Sliding-window boundary offsets and overlapping continuity verification.
+   - Edge case handling (empty strings, single small chunks, invalid parameter validation).
+   - End-to-end file upload and background chunking completion for text/markdown files.
+   - End-to-end PDF upload and page extraction completion.
+   - HTTP 413 rejection verification for oversized files.
+   - HTTP 400 rejection verification for unsupported extensions.
+   - HTTP 404 rejection verification for non-existent projects.
 
 ---
 
-## Next Steps (Week 2 — Ingestion & Processing Pipeline)
+### Week 1 — Backend Foundation (Completed)
 
-1. **File Storage & Ingestion Service**:
-   - Implement storage provider interface (local disk / S3 compatible) for document uploads.
-   - Multipart file upload endpoints in `/api/v1/documents/upload`.
-2. **Background Worker / Task Queue Integration**:
-   - Evaluate lightweight async background workers (or Redis / Celery / ARQ) to process `ProcessingJob` queues.
-3. **Document Parsing & Text Extraction**:
-   - Handlers for markdown, PDF, and code files.
+1. **Modular FastAPI Application Architecture**
+   - Core scaffolding (`src/core/`, `src/models/`, `src/schemas/`, `src/api/v1/`).
+   - Lifespan management with graceful async engine disposal and CORS middleware.
+2. **Async Database Infrastructure**
+   - Native SQLAlchemy 2.0 async engine and session factory supporting PostgreSQL (`asyncpg`) and SQLite (`aiosqlite`).
+   - Scoped `get_db` and `get_session_factory` transaction dependencies.
+   - Asynchronous Alembic migration setup (`alembic/`).
+3. **Domain Models**
+   - `Project`, `Document`, and `ProcessingJob` with UUID primary keys and timezone-aware timestamps.
+4. **Pydantic v2 Validation**
+   - Strict schemas with `from_attributes=True` and standardized pagination.
+5. **Initial Test Suite**
+   - 15 integration tests covering health, project CRUD, document CRUD, and job state transitions.
+
+---
+
+## Next Steps (Week 3 — Embeddings & Vector Search)
+
+1. **Vector Embedding Pipeline**:
+   - Integrate embedding generation service (e.g. sentence-transformers, OpenAI/Vertex AI embeddings).
+   - Generate vector representations for each text chunk produced by the ingestion pipeline.
+2. **Vector Store Integration**:
+   - Evaluate and integrate vector storage (e.g. pgvector for PostgreSQL or local FAISS/Chroma).
+3. **Semantic Search Endpoints**:
+   - `POST /api/v1/search`: Query semantic similarity across indexed document chunks within a project.
