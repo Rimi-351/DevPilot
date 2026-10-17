@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.core.database import get_db, get_session_factory
 from src.models.document import Document
+from src.models.document_chunk import DocumentChunk
 from src.models.processing_job import JobStatus, ProcessingJob
 from src.models.project import Project
 from src.schemas.common import PaginatedResponse
@@ -30,6 +31,7 @@ from src.schemas.document import (
     DocumentUploadResponse,
 )
 from src.services.chunker import chunk_text
+from src.services.embedding import get_embedding_service
 from src.services.extractor import extract_text_from_file
 from src.services.storage import LocalStorageService
 
@@ -42,7 +44,7 @@ async def process_document_background(
     file_type: str,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Background task to extract text, calculate chunks, and update job status."""
+    """Background task to extract text, calculate chunks, generate embeddings, and persist chunks."""
     async with session_factory() as session:
         try:
             job = await session.get(ProcessingJob, job_id)
@@ -59,8 +61,33 @@ async def process_document_background(
             chunks = chunk_text(text)
             chunk_dicts = [c.to_dict() for c in chunks]
 
+            # Generate vector embeddings
+            embedding_service = get_embedding_service()
+            chunk_texts = [c.content for c in chunks]
+            embeddings = await embedding_service.generate_embeddings(chunk_texts)
+
+            # Bulk-insert DocumentChunk rows
+            if chunks and job.document_id and job.project_id:
+                db_chunks = [
+                    DocumentChunk(
+                        document_id=job.document_id,
+                        project_id=job.project_id,
+                        chunk_index=chunk.index,
+                        content=chunk.content,
+                        start_offset=chunk.start_offset,
+                        end_offset=chunk.end_offset,
+                        embedding=embeddings[i] if i < len(embeddings) else None,
+                    )
+                    for i, chunk in enumerate(chunks)
+                ]
+                session.add_all(db_chunks)
+
+            dimensions = len(embeddings[0]) if embeddings and len(embeddings) > 0 else 0
             job.status = JobStatus.COMPLETED
             job.result = {
+                "chunks_count": len(chunks),
+                "embedded": True,
+                "dimensions": dimensions,
                 "chunk_count": len(chunks),
                 "total_characters": len(text),
                 "chunks_preview": chunk_dicts[:5],

@@ -1,0 +1,1 @@
+Detailed provenance tracking includes character offsets and source file metadata.

@@ -1,0 +1,1 @@
+Alpha project manages front-end client components and UI state.

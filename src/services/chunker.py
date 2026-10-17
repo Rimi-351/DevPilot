@@ -12,6 +12,11 @@ class TextChunk:
     start_offset: int
     end_offset: int
 
+    @property
+    def content(self) -> str:
+        """Alias for text for consistent chunk content access."""
+        return self.text
+
     def to_dict(self) -> dict:
         """Convert chunk metadata to dictionary."""
         return asdict(self)

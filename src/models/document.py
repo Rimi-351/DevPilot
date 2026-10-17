@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from src.models.document_chunk import DocumentChunk
     from src.models.processing_job import ProcessingJob
     from src.models.project import Project
 
@@ -34,6 +35,12 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     processing_jobs: Mapped[list["ProcessingJob"]] = relationship(
         "ProcessingJob",
         back_populates="document",
+        lazy="selectin",
+    )
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
         lazy="selectin",
     )
 

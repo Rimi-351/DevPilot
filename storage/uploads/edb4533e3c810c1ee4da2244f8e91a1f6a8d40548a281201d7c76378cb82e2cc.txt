@@ -1,0 +1,1 @@
+DevPilot integrates FastAPI and SQLAlchemy 2.0 with vector embeddings for semantic search.
