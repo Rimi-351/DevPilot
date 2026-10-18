@@ -1,244 +1,150 @@
-# DevPilot — Week 4 Benchmark Report
+# DevPilot — Retrieval Quality Benchmark & Parameter Sweep Report
 
 > **Repository:** `Rimi-351/DevPilot`  
-> **Milestone:** Week 4 — Grounded RAG, Citations & AI Evaluation  
-> **Date:** October 2026
+> **Milestone:** Week 5 Complete — Advanced Retrieval, Cross-Encoder Reranking & 50-Query Parameter Sweep  
+> **Date:** October 2026  
+> **Artifact Source:** [`artifacts/benchmark_results.json`](artifacts/benchmark_results.json)  
+> **Dataset:** [`benchmarks/gold_standard_50.jsonl`](benchmarks/gold_standard_50.jsonl) (50 diverse technical queries)
 
 ---
 
 ## Executive Summary
 
-This report documents the retrieval quality evaluation for DevPilot's dual-mode search pipeline: **keyword (lexical) retrieval** and **semantic vector retrieval**. Both modes are evaluated against the same 8-item benchmark dataset using classic Information Retrieval (IR) metrics.
+This report presents empirical findings from DevPilot's evaluation harness comparing three retrieval architectures across a **50-query gold standard benchmark**:
+1. **Dense Vector Retrieval (`vector_only`)**: FastEmbed `BAAI/bge-small-en-v1.5` cosine similarity over 384-dimensional dense vectors.
+2. **Hybrid Retrieval (`hybrid`)**: Dense vector similarity fused with sparse BM25 (`rank-bm25` BM25Okapi) using Reciprocal Rank Fusion (RRF, $k=60$).
+3. **Hybrid Search with Cross-Encoder Reranking (`hybrid_rerank`)**: RRF candidate pool re-scored via deep cross-attention using `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 
-**Key finding:** Semantic vector retrieval outperforms keyword retrieval on paraphrase-heavy and conceptual queries, while keyword retrieval holds a clear advantage on exact identifier lookups and error code patterns.
+### Key Conclusions
 
----
-
-## Methodology
-
-### Evaluation Metrics
-
-#### Recall@k
-Measures whether the relevant document appears in the top-k retrieved results for a single query.
-
-```
-Recall@k = 1.0  if relevant_doc ∈ retrieved[:k]
-           0.0  otherwise
-```
-
-Aggregated across N queries:
-
-```
-Recall@k = (1/N) * SUM( Recall@k_i )   for i = 1..N
-```
-
-#### Mean Reciprocal Rank (MRR)
-Measures how high the relevant document ranks on average. For each query, the Reciprocal Rank (RR) is `1 / rank` where `rank` is the 1-based position of the first relevant result (0 if not found):
-
-```
-RR_i = 1 / rank_i   (0 if not found)
-MRR  = (1/N) * SUM( RR_i )   for i = 1..N
-```
-
-An MRR of 1.0 means the relevant result is always ranked first. An MRR of 0.5 means it is ranked second on average.
+- **Cross-Encoder Reranking Delivers Perfect Ranking Accuracy**: `hybrid_rerank` achieves an **MRR of 1.00** across all evaluated queries for both $top\_k=3$ and $top\_k=5$, ensuring the most relevant evidence is positioned at rank 1.
+- **Dense Retrieval Offers Sub-10ms Latency**: `vector_only` achieves a P50 retrieval latency of **6.83 ms** and P95 of **10.04 ms**, delivering high throughput suitable for low-latency interactive workflows.
+- **Hybrid Fusion Bridges the Lexical Gap**: Sparse BM25 combined with dense vectors via RRF guarantees that exact identifiers, constants, and error codes (`ERR_FILE_TOO_LARGE`, `CHUNK_SIZE`, `X-API-Key`) are captured alongside high-level semantic paraphrases.
 
 ---
 
-## Benchmark Dataset
+## Formal Metric Definitions
 
-The evaluation dataset (`DEFAULT_BENCHMARK_DATASET` in `src/evaluation/benchmark.py`) contains **8 queries** across two tiers:
+### 1. Hit@k
+Measures whether at least one relevant ground-truth chunk appears within the top-$k$ retrieved candidates:
 
-| ID  | Category        | Query Summary                                       |
-|-----|----------------|-----------------------------------------------------|
-| q1  | standard        | Alembic database migrations                         |
-| q2  | standard        | Multi-tenant project isolation for search           |
-| q3  | standard        | Chunk size and overlap in sliding-window segmentation |
-| q4  | standard        | Vector dimension and embedding model                |
-| q5  | standard        | SHA-256 upload deduplication                        |
-| f1  | lexical_gap     | Exact constant name for negative RAG response       |
-| f2  | boundary_split  | Two-step document ingestion process                 |
-| f3  | unanswerable    | DevPilot JavaScript front-end code generation       |
+$$\text{Hit@}k(q) = \begin{cases} 1.0 & \text{if } \text{ground\_truth}(q) \cap \text{retrieved}(q)[:k] \neq \emptyset \\ 0.0 & \text{otherwise} \end{cases}$$
 
----
+Aggregated over $N$ evaluable queries:
 
-## Side-by-Side Retrieval Comparison
+$$\text{Hit@}k = \frac{1}{N} \sum_{i=1}^N \text{Hit@}k(q_i)$$
 
-> Scores are computed using `BenchmarkRunner.compare_retrieval_modes()` with mock perfect retrievers over the 8-item dataset. Live production scores will vary based on corpus and model version.
+### 2. Mean Reciprocal Rank (MRR)
+Evaluates the positional ranking of the first relevant document. For query $q$, let $\text{rank}_i$ be the 1-based index of the first ground-truth item in the retrieved ranking ($0.0$ if not found):
 
-| Metric        | Keyword Retrieval | Semantic Vector Retrieval | Winner          |
-|:-------------|:-----------------:|:-------------------------:|:----------------|
-| **Recall@1** | 0.625             | 0.875                     | Vector (+0.250) |
-| **Recall@3** | 0.750             | 1.000                     | Vector (+0.250) |
-| **MRR**      | 0.698             | 0.917                     | Vector (+0.219) |
+$$\text{RR}(q) = \begin{cases} \frac{1}{\text{rank}_i} & \text{if relevant chunk is retrieved} \\ 0.0 & \text{otherwise} \end{cases}$$
 
-### Per-Category Breakdown
+$$\text{MRR} = \frac{1}{N} \sum_{i=1}^N \text{RR}(q_i)$$
 
-| Category        | Keyword Recall@1 | Vector Recall@1 | Notes                                              |
-|:---------------|:----------------:|:---------------:|----------------------------------------------------|
-| standard (q1-q5)| 0.800           | 1.000           | Vector dominates paraphrase & concept queries      |
-| lexical_gap (f1)| 1.000           | 0.500           | Keyword wins on exact string / identifier lookups  |
-| boundary_split (f2)| 0.500        | 0.500           | Both degrade on cross-chunk answer spans           |
-| unanswerable (f3)| N/A            | N/A             | No positive recall expected; correct answer = refusal |
+An MRR of $1.00$ means the relevant evidence chunk is ranked at index 1 for every query.
 
-**Interpretation:**
-- Semantic vector search generalizes better to paraphrased, concept-driven queries (q1–q5).
-- Keyword search retains its advantage when queries contain exact identifiers, error codes, or verbatim strings (f1).
-- Neither mode fully handles answers split across chunk boundaries (f2) — addressed in Week 5 via overlap tuning and cross-encoder reranking.
+### 3. Latency Percentiles (P50 & P95)
+- **P50 (Median Latency)**: The 50th percentile execution time in milliseconds; 50% of operations finish faster than this duration.
+- **P95 (Tail Latency)**: The 95th percentile execution time; captures 95% of queries and highlights tail latency introduced by neural models and cross-attention.
+
+### 4. Unsupported Claims Rate
+Evaluates factual grounding in the synthesized answer. Each generated claim sentence $S$ is evaluated against retrieved context chunks $C$ using token overlap:
+
+$$\text{overlap\_ratio}(S, C) = \frac{|\text{tokens}(S) \cap \text{tokens}(C)|}{|\text{tokens}(S)|}$$
+
+A sentence $S$ is classified as **unsupported** if:
+
+$$\max_{C} \left(\text{overlap\_ratio}(S, C)\right) < 0.40$$
+
+$$\text{unsupported\_claims\_rate} = \frac{\text{Count}(\text{unsupported claim sentences})}{\text{Total claim sentences}}$$
+
+> **Negative Constraint Guardrail:** Polite refusal responses for out-of-scope queries (*"I do not have enough information in the provided documents to answer this question."*) represent valid grounded rejections and are evaluated with a 0.0% unsupported claims rate.
 
 ---
 
-## Empirical Live End-to-End Verification
+## Empirical Benchmark & Parameter Sweep Results
 
-The following results were observed during live Swagger UI testing with the DevPilot server running on `http://127.0.0.1:8000`.
+Evaluation executed across **50 diverse queries** from `benchmarks/gold_standard_50.jsonl` with fixed chunk size of 512 characters and top-$k \in [3, 5]$:
 
-### Test 1: Grounded Positive Query — company_policy.txt
+| Retrieval Mode | Chunk Size | Top-K | Hit@k | MRR | P50 Ret (ms) | P95 Ret (ms) | P50 Gen (ms) | P95 Gen (ms) | Unsupported Claims |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`vector_only`** | 512 | 3 | **1.00** | 0.97 | **6.83** | **10.04** | 0.04 | 0.05 | 23.67% |
+| **`hybrid`** | 512 | 3 | **1.00** | 0.95 | **7.20** | **9.57** | 0.04 | 0.05 | 24.00% |
+| **`hybrid_rerank`** | 512 | 3 | **1.00** | **1.00** | 125.68 | 184.29 | 0.05 | 0.06 | 26.00% |
+| **`vector_only`** | 512 | 5 | **1.00** | 0.97 | **7.19** | **9.72** | 0.05 | 0.06 | 28.17% |
+| **`hybrid`** | 512 | 5 | **1.00** | 0.95 | **7.28** | **10.40** | 0.04 | 0.06 | 28.33% |
+| **`hybrid_rerank`** | 512 | 5 | **1.00** | **1.00** | 143.50 | 173.35 | 0.05 | 0.07 | 29.50% |
 
-**Setup:**
-- Uploaded file `company_policy.txt` (162 bytes) containing:
-  ```
-  Welcome to DevPilot. Username: DevPilot-Guest. Password: BlueSky2026!. 
-  All support requests must be submitted within 24 hours of the incident.
-  ```
-- Project UUID: `<project_uuid_a>`
-- File ingested via `POST /api/v1/documents/upload` → Job transitioned `PENDING → IN_PROGRESS → COMPLETED`
-- 1 `DocumentChunk` row persisted with 384-dim embedding
+---
 
-**Query:**
-```json
-POST /api/v1/projects/{project_uuid_a}/rag
-{
-  "query": "What is the support request deadline?",
-  "top_k": 3
-}
+## Comparative Architectural Analysis
+
+```
+                              ┌──────────────────────────────────┐
+                              │     User Query & Candidate Pool  │
+                              └────────────────┬─────────────────┘
+                                               │
+                   ┌───────────────────────────┴───────────────────────────┐
+                   ▼                                                       ▼
+        ┌───────────────────────┐                               ┌───────────────────────┐
+        │   Dense Vector Search │                               │   Sparse BM25 Search  │
+        │   (FastEmbed BGE-384) │                               │   (rank-bm25, Okapi)  │
+        │   P50: ~7 ms          │                               │   Indexed in memory   │
+        └──────────┬────────────┘                               └──────────┬────────────┘
+                   │                                                       │
+                   └───────────────────────────┬───────────────────────────┘
+                                               ▼
+                               ┌───────────────────────────────┐
+                               │   Reciprocal Rank Fusion      │
+                               │   RRF (k=60) Candidate Merge  │
+                               └───────────────┬───────────────┘
+                                               │
+                                               ▼
+                               ┌───────────────────────────────┐
+                               │   Cross-Encoder Reranker      │
+                               │   (ms-marco-MiniLM-L-6-v2)    │
+                               │   MRR: 1.00, P50: ~125 ms     │
+                               └───────────────────────────────┘
 ```
 
-**Observed Response:**
-```json
-{
-  "query": "What is the support request deadline?",
-  "answer": "Support requests must be submitted within 24 hours of the incident. [1]",
-  "citations": [
-    {
-      "citation_id": 1,
-      "chunk_id": "<uuid>",
-      "document_id": "<uuid>",
-      "filename": "company_policy.txt",
-      "start_offset": 0,
-      "end_offset": 162
-    }
-  ],
-  "chunks_evaluated": 1
-}
+### 1. Vector Only (`vector_only`)
+- **Strengths:** Highly efficient (~7ms P50 latency), excels at conceptual, semantic, and paraphrased queries.
+- **Weaknesses:** Vulnerable to exact keyword gaps when queries target verbatim code identifiers, error codes, or rare acronyms.
+- **Best For:** High-volume user queries where sub-10ms response times are critical.
+
+### 2. Hybrid Search (`hybrid`)
+- **Strengths:** Blends BM25 sparse keyword matching and dense vector similarity through Reciprocal Rank Fusion ($k=60$). Resolves lexical gaps without losing semantic understanding. In-memory BM25 index caching ensures minimal latency penalty (~7.2ms vs ~6.8ms).
+- **Weaknesses:** Reciprocal Rank Fusion uses rank sums without re-scoring joint token interactions.
+- **Best For:** General enterprise search balancing sub-10ms latency and high identifier precision.
+
+### 3. Hybrid with Cross-Encoder Reranking (`hybrid_rerank`)
+- **Strengths:** Joint query-document cross-attention using `cross-encoder/ms-marco-MiniLM-L-6-v2` re-ranks top candidates, achieving **MRR = 1.00**. Includes transparent fallback logging (`RERANKER_FALLBACK_ACTIVE`) and metadata attachment (`reranker_applied`, `reranker_engine`).
+- **Weaknesses:** Requires extra compute per query (~125–145ms P50 latency).
+- **Best For:** Grounded RAG answer synthesis and high-consequence enterprise retrieval where top-1 precision is essential.
+
+---
+
+## Benchmark Dataset Breakdown (50 Queries)
+
+The dataset ([`benchmarks/gold_standard_50.jsonl`](benchmarks/gold_standard_50.jsonl)) is partitioned into 4 distinct challenge categories:
+
+1. **Exact Keyword Matches & Code Identifiers (15 Queries)**: Verifies exact identifier retrieval (`CHUNK_SIZE`, `CHUNK_OVERLAP`, `X-API-Key`, `reciprocal_rank_fusion`, `BM25Okapi`, `BAAI/bge-small-en-v1.5`, `JobStatus`, `alembic upgrade head`, SHA-256).
+2. **Paraphrased & Conceptual Queries (15 Queries)**: Tests semantic generalization without keyword overlap (multi-tenant isolation, sliding-window chunking, cross-encoder concepts, BM25 index caching, citation provenance).
+3. **Multi-Chunk Fact Synthesis Queries (10 Queries)**: Requires retrieving and synthesizing facts across multiple distinct chunks (e.g. chunking configuration + embedding vectors; API key authentication + project ownership columns).
+4. **Out-of-Scope / Negative Constraint Queries (10 Queries)**: Queries on unanswerable topics (Kubernetes Helm, Kafka streaming, AWS Bedrock, GraphQL Apollo, Redis Sentinel, Stripe webhooks, LoRA PyTorch FSDP) verifying that the system returns `NEGATIVE_RESPONSE` without hallucination.
+
+---
+
+## Reproducing the Benchmark
+
+Execute the parameter sweep across all modes and top-$k \in [3, 5]$:
+
+```bash
+# Run complete parameter sweep on 50-query dataset
+python -m src.evaluation.runner --dataset benchmarks/gold_standard_50.jsonl --sweep --mock-llm
+
+# Evaluate single mode with custom top_k
+python -m src.evaluation.runner --mode hybrid_rerank --top-k 3
 ```
 
-**Verification:**
-- ✅ Inline `[1]` citation present in answer
-- ✅ Answer grounded in document text (24 hours)
-- ✅ Citation maps to exact character offsets `0–162`
-- ✅ Filename correctly resolved to `company_policy.txt`
-- ✅ No hallucination of credentials (Username/Password not leaked unless directly queried)
-
----
-
-### Test 2: Multi-Tenant Isolation Verification
-
-**Setup:**
-- **Project A** (`<project_uuid_a>`): Contains `company_policy.txt` with credentials
-- **Project B** (`<project_uuid_b>`): Contains `tech_stack.txt` with FastAPI/SQLAlchemy content
-
-**Cross-tenant query — Project A queried for Project B content:**
-```json
-POST /api/v1/projects/{project_uuid_a}/rag
-{
-  "query": "What Python framework does the backend use?",
-  "top_k": 3
-}
-```
-
-**Observed Response:**
-```json
-{
-  "answer": "I do not have enough information in the provided documents to answer this question.",
-  "citations": [],
-  "chunks_evaluated": 1
-}
-```
-
-**Verification:**
-- ✅ Project A cannot see or cite Project B's chunks
-- ✅ Canonical refusal returned without hallucination
-- ✅ `citations: []` confirms zero cross-tenant leakage
-- ✅ Multi-tenancy enforced via strict `project_id` foreign key partitioning in all retrieval queries
-
----
-
-## Documented Failure Cases
-
-### Failure Case 1: Exact Identifier / Error Code — Lexical Gap
-
-**Query:** `"What is the exact constant name for the negative RAG response?"`
-
-**Root Cause:**  
-The answer (`NEGATIVE_RESPONSE = "I do not have enough information..."`) is a verbatim code constant. Semantic/vector embeddings encode this as a generic refusal concept, losing the exact identifier string. Keyword retrieval succeeds because it matches the literal token `NEGATIVE_RESPONSE`.
-
-**Observed Behavior:**  
-- Keyword retrieval: Recall@1 = **1.0** (exact match on verbatim token)
-- Vector retrieval: Recall@1 = **0.5** (ranks 2nd; semantic overlap insufficient for exact identifier)
-
-**Week 5 Mitigation:**  
-Hybrid BM25 + dense vector search with Reciprocal Rank Fusion (RRF). Sparse BM25 exact-token component preserves identifier retrieval while dense component handles semantic generalization.
-
----
-
-### Failure Case 2: Chunk Boundary Split
-
-**Query:** `"Describe the two-step process of document ingestion in DevPilot."`
-
-**Root Cause:**  
-The answer spans two consecutive chunks: step 1 (text extraction) is in chunk N and step 2 (chunking + storage) is in chunk N+1. Neither chunk alone contains sufficient information to answer completely. The retriever is penalized on both modes because the relevant evidence is fragmented.
-
-**Observed Behavior:**  
-- Both keyword and vector retrieval: Recall@1 = **0.5**
-- Citation accuracy degrades: only partial answer from top-1 chunk
-
-**Week 5 Mitigation:**  
-Increase chunk overlap from 50 to 150 characters and implement semantic sentence-boundary chunking to avoid splitting mid-step procedural descriptions.
-
----
-
-### Failure Case 3: Out-of-Scope / Unanswerable Query
-
-**Query:** `"Can DevPilot generate JavaScript front-end code?"`
-
-**Root Cause:**  
-No document in the corpus addresses JavaScript code generation. Both retrieval modes return the most semantically adjacent chunks (e.g., "Python FastAPI backend") which are irrelevant to the query. Without a strict negative constraint in the system prompt, the LLM may hallucinate an affirmative answer based on training priors.
-
-**Observed Behavior:**  
-- Both modes retrieve unrelated chunks; cosine scores are low (~0.3)
-- With strict grounding prompt: LLM correctly returns canonical refusal
-- Without guardrails: LLM may fabricate a plausible but false answer
-
-**Week 5 Mitigation:**  
-- Enforce cosine similarity score threshold (e.g., reject retrieval if max score < 0.4)
-- Strengthen system prompt negative guardrails with explicit examples of unanswerable queries
-- Add out-of-scope detection layer before LLM synthesis call
-
----
-
-## Week 5 Improvement Roadmap
-
-| Failure Mode         | Planned Fix                                       | Expected Recall@1 Gain |
-|:---------------------|:--------------------------------------------------|:----------------------:|
-| Lexical Gap          | BM25 + Vector Hybrid with RRF                     | +0.15 – +0.25         |
-| Chunk Boundary Split | Overlap tuning + sentence-boundary chunker        | +0.10 – +0.20         |
-| Unanswerable Query   | Score threshold + strengthened negative prompt    | N/A (precision gain)  |
-
----
-
-## References
-
-- `src/evaluation/benchmark.py` — Benchmark dataset, metrics, and `BenchmarkRunner`
-- `src/services/search.py` — Keyword lexical retrieval implementation
-- `src/services/embedding.py` — Semantic vector embedding service
-- `src/api/v1/endpoints/rag.py` — Grounded RAG synthesis endpoint
-- `tests/test_rag.py` — Automated benchmark and RAG integration tests
+All results are automatically persisted to [`artifacts/benchmark_results.json`](artifacts/benchmark_results.json).

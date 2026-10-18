@@ -32,3 +32,4 @@ class ProjectRead(ProjectBase, TimestampSchema):
     """Schema for reading project data."""
 
     id: UUID
+    tenant_id: Optional[str] = None

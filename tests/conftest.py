@@ -91,7 +91,11 @@ async def client(test_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
         patch("src.api.v1.endpoints.documents.async_session_factory", session_factory),
     ):
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"X-API-Key": "test-default-api-key"},
+        ) as ac:
             yield ac
 
     app.dependency_overrides.clear()

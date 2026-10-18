@@ -1,6 +1,9 @@
 """Sliding-window text chunker with character offset tracking."""
 
 from dataclasses import asdict, dataclass
+from typing import Optional
+
+from src.core.config import settings
 
 
 @dataclass(frozen=True)
@@ -24,15 +27,15 @@ class TextChunk:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 500,
-    chunk_overlap: int = 50,
+    chunk_size: Optional[int] = None,
+    chunk_overlap: Optional[int] = None,
 ) -> list[TextChunk]:
     """Partition text into overlapping segments using a sliding window.
 
     Args:
         text: The source string to be chunked.
-        chunk_size: Maximum character length per chunk (default 500).
-        chunk_overlap: Number of overlapping characters between consecutive chunks (default 50).
+        chunk_size: Maximum character length per chunk (defaults to settings.CHUNK_SIZE, 512).
+        chunk_overlap: Overlapping characters between chunks (defaults to settings.CHUNK_OVERLAP, 64).
 
     Returns:
         List of TextChunk instances with index, text, start_offset, and end_offset.
@@ -40,6 +43,10 @@ def chunk_text(
     Raises:
         ValueError: If chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size.
     """
+    if chunk_size is None:
+        chunk_size = settings.CHUNK_SIZE
+    if chunk_overlap is None:
+        chunk_overlap = settings.CHUNK_OVERLAP
     if chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {chunk_size}")
     if chunk_overlap < 0:

@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  devpilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: devpilot_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PROJECT_NAME=DevPilot
+      - VERSION=0.1.0
+      - DEBUG=True
+      - API_V1_STR=/api/v1
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/devpilot
+      - DB_POOL_SIZE=10
+      - DB_MAX_OVERFLOW=20
+      - DB_POOL_TIMEOUT=30
+      - CHUNK_SIZE=512
+      - CHUNK_OVERLAP=64
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
+    volumes:
+      - storage_data:/app/storage
+      - artifacts_data:/app/artifacts
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    container_name: devpilot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: devpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d devpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
+  storage_data:
+    driver: local
+  artifacts_data:
+    driver: local

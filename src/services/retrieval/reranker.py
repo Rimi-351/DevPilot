@@ -70,6 +70,7 @@ class RerankerService:
 
         model = self._get_model()
         scores: list[float] = []
+        engine = "cross_encoder"
 
         if model is not None:
             try:
@@ -80,6 +81,8 @@ class RerankerService:
                 model = None
 
         if not scores:
+            logger.warning("RERANKER_FALLBACK_ACTIVE")
+            engine = "heuristic"
             # Fallback heuristic: token overlap & position weighting + previous score if any
             query_tokens = set(query.lower().split())
             for c in candidates:
@@ -89,11 +92,13 @@ class RerankerService:
                 heuristic_score = float(overlap * 1.5 + float(existing_score))
                 scores.append(heuristic_score)
 
-        # Attach rerank_score to each candidate
+        # Attach rerank_score and reranker metadata to each candidate
         reranked: list[dict[str, Any]] = []
         for candidate, score in zip(candidates, scores):
             item = dict(candidate)
             item["rerank_score"] = float(score)
+            item["reranker_applied"] = True
+            item["reranker_engine"] = engine
             reranked.append(item)
 
         # Sort descending by rerank_score

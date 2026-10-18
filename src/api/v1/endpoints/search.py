@@ -1,6 +1,7 @@
 """Search API endpoints for semantic similarity retrieval and document provenance."""
 
 import math
+import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
+from src.core.security import get_current_api_key, verify_project_tenant_access
 from src.models.document import Document
 from src.models.document_chunk import DocumentChunk
 from src.models.project import Project
@@ -43,9 +45,10 @@ def compute_cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
 async def search_project_documents(
     project_id: UUID,
     request: SearchQueryRequest,
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> SearchResponse:
-    """Execute vector cosine-similarity search over document chunks in a project."""
+    """Execute vector cosine-similarity search over document chunks in a project with tenant isolation."""
     # 1. Verify project exists
     project = await db.get(Project, project_id)
     if not project:
@@ -53,6 +56,7 @@ async def search_project_documents(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project with ID '{project_id}' does not exist.",
         )
+    verify_project_tenant_access(project, api_key)
 
     # 2. Retrieve or compute query representation based on mode
     if request.mode == "vector":

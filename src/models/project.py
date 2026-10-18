@@ -19,6 +19,8 @@ class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    owner_api_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
 
     # Relationships
     documents: Mapped[list["Document"]] = relationship(

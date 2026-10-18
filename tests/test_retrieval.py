@@ -77,6 +77,8 @@ def test_reranker_service_ordering():
     # c2 has words 'database' and 'migrations', so heuristic score should be higher
     assert reranked[0]["chunk_id"] == "c2"
     assert "rerank_score" in reranked[0]
+    assert reranked[0]["reranker_applied"] is True
+    assert reranked[0]["reranker_engine"] == "heuristic"
 
 
 @pytest.mark.asyncio
@@ -100,18 +102,19 @@ async def test_retrieve_chunks_all_modes():
     hr_results = await retrieve_chunks(query, corpus, search_mode="hybrid_rerank", top_k=1)
     assert len(hr_results) == 1
     assert "rerank_score" in hr_results[0]
+    assert hr_results[0]["reranker_applied"] is True
 
 
 def test_unsupported_claims_metric():
-    retrieved = [{"content": "DevPilot uses Alembic for database migrations."}]
-    grounded_answer = "DevPilot uses Alembic for database migrations."
-    hallucinated_answer = "DevPilot uses MongoDB Atlas cloud clusters for serverless scaling."
+    retrieved = [{"index": 1, "content": "DevPilot uses Alembic for database migrations and schema evolution."}]
+    grounded_answer = "DevPilot uses Alembic for database migrations [1]."
+    hallucinated_answer = "DevPilot uses MongoDB Atlas cloud clusters for serverless scaling [1]."
 
     rate_grounded = check_unsupported_claims(grounded_answer, retrieved)
     rate_hallucinated = check_unsupported_claims(hallucinated_answer, retrieved)
 
-    assert rate_grounded < 0.1
-    assert rate_hallucinated > 0.5
+    assert rate_grounded == 0.0
+    assert rate_hallucinated == 1.0
 
 
 def test_compute_percentiles():

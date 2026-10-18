@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.v1.endpoints.search import compute_cosine_similarity
 from src.core.database import get_db
+from src.core.security import get_current_api_key, verify_project_tenant_access
 from src.models.document import Document
 from src.models.document_chunk import DocumentChunk
 from src.models.project import Project
@@ -27,6 +28,7 @@ router = APIRouter()
 async def generate_rag_answer(
     project_id: UUID,
     request: RagQueryRequest,
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> RagResponse:
     """Perform semantic retrieval, assemble grounded context, and synthesize an answer with citations."""
@@ -37,6 +39,7 @@ async def generate_rag_answer(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project with ID '{project_id}' does not exist.",
         )
+    verify_project_tenant_access(project, api_key)
 
     # 2. Retrieve chunks belonging to project joined with Document for filename
     stmt = (

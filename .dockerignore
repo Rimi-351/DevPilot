@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.pytest_cache
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.vscode
+.idea
+*.db
+*.sqlite
+storage/uploads/*
+!storage/uploads/.gitkeep

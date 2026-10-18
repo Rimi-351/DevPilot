@@ -10,6 +10,8 @@ from src.evaluation.benchmark import (
     compute_reciprocal_rank,
 )
 
+from src.evaluation.metrics import compute_unsupported_claims_rate
+
 __all__ = [
     "DEFAULT_BENCHMARK_DATASET",
     "BenchmarkQuery",
@@ -18,4 +20,5 @@ __all__ = [
     "compute_mrr",
     "compute_recall_at_k",
     "compute_reciprocal_rank",
+    "compute_unsupported_claims_rate",
 ]

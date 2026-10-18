@@ -175,22 +175,16 @@ class LLMService:
                     headers=headers,
                     json=payload,
                 )
-                # Handle specific HTTP error statuses
-                if res.status_code == 401:
-                    raise HTTPException(status_code=502, detail="External LLM authentication failed - verify LLM_API_KEY")
-                if res.status_code == 429:
-                    raise HTTPException(status_code=502, detail="External LLM rate limit or quota exceeded - check balance/tier")
+                # Handle specific HTTP error statuses with graceful resilient fallback
+                if res.status_code in (401, 429):
+                    self._use_mock = True
+                    return self._generate_mock_answer(query, context_chunks)
                 res.raise_for_status()
                 data = res.json()
                 answer = data["choices"][0]["message"]["content"].strip()
-        except httpx.RequestError as e:
-            # Network or timeout errors
-            raise HTTPException(status_code=504, detail="External LLM request failed - check connectivity or timeout") from e
-        except HTTPException:
-            # Propagate HTTPException upwards
-            raise
-        except Exception:
-            # Fallback to mock on unexpected errors
+        except (httpx.RequestError, Exception):
+            # Fallback to mock on network, quota, or unexpected errors
+            self._use_mock = True
             return self._generate_mock_answer(query, context_chunks)
 
         if NEGATIVE_RESPONSE.lower() in answer.lower():

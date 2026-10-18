@@ -1,19 +1,48 @@
 {
-  "timestamp": "2026-10-18T17:01:26Z",
+  "timestamp": "2026-10-18T18:05:17Z",
+  "dataset": "benchmarks/gold_standard_50.jsonl",
+  "dataset_size": 50,
+  "chunk_size": 512,
   "top_k": 3,
-  "dataset_size": 5,
   "results": [
+    {
+      "mode": "vector_only",
+      "top_k": 3,
+      "total_queries": 50,
+      "hit_at_k": 1.0,
+      "mrr": 0.9708,
+      "p50_retrieval_ms": 10.09,
+      "p95_retrieval_ms": 38.06,
+      "p50_generation_ms": 0.05,
+      "p95_generation_ms": 1165.92,
+      "unsupported_claims_rate": 0.1667,
+      "chunk_size": 512
+    },
+    {
+      "mode": "hybrid",
+      "top_k": 3,
+      "total_queries": 50,
+      "hit_at_k": 1.0,
+      "mrr": 0.9458,
+      "p50_retrieval_ms": 7.5,
+      "p95_retrieval_ms": 9.67,
+      "p50_generation_ms": 0.04,
+      "p95_generation_ms": 0.05,
+      "unsupported_claims_rate": 0.24,
+      "chunk_size": 512
+    },
     {
       "mode": "hybrid_rerank",
       "top_k": 3,
-      "total_queries": 5,
+      "total_queries": 50,
       "hit_at_k": 1.0,
       "mrr": 1.0,
-      "p50_retrieval_ms": 170.71,
-      "p95_retrieval_ms": 17157.27,
-      "p50_generation_ms": 957.38,
-      "p95_generation_ms": 1213.85,
-      "unsupported_claims_rate": 0.2924
+      "p50_retrieval_ms": 123.99,
+      "p95_retrieval_ms": 133.17,
+      "p50_generation_ms": 0.05,
+      "p95_generation_ms": 0.06,
+      "unsupported_claims_rate": 0.26,
+      "chunk_size": 512
     }
   ]
 }

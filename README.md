@@ -3,196 +3,209 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0%20(async)-red?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org)
-[![Pydantic v2](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
-[![Tested with Pytest](https://img.shields.io/badge/Pytest-37%2F37%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
+[![CI Pipeline](https://img.shields.io/badge/CI-GitHub%20Actions-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
+[![Tested with Pytest](https://img.shields.io/badge/Pytest-48%2F48%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 
 ---
 
-## Week 4 Portfolio Milestone — Grounded RAG & AI Evaluation
+## Milestone Status — Weeks 1–5 Complete
 
-DevPilot is an AI-assisted document intelligence platform built across a 12-week engineering program. At the **Week 4 milestone**, the following capabilities are fully implemented and verified:
+DevPilot is a production-grade, multi-tenant AI document intelligence platform built with modern async Python standards. At the **Week 5 milestone**, the platform features a complete end-to-end retrieval and grounded answer synthesis pipeline:
 
-| Capability | Status |
-|:-----------|:------:|
-| Async FastAPI backend with SQLAlchemy 2.0 | ✅ |
-| Document ingestion pipeline with background workers | ✅ |
-| 384-dim vector embeddings (BAAI/bge-small-en-v1.5) | ✅ |
-| Multi-tenant semantic search with cosine similarity | ✅ |
-| Grounded RAG with citation provenance | ✅ |
-| Keyword vs. Vector retrieval benchmark | ✅ |
-| 37/37 integration tests passing, 0 warnings | ✅ |
-| Live Swagger UI end-to-end verification | ✅ |
+| Capability | Status | Notes |
+|:---|:---:|:---|
+| **Async FastAPI & SQLAlchemy 2.0** | ✅ | Asynchronous connection pooling and declarative ORM |
+| **Authentication & Tenant Isolation** | ✅ | `X-API-Key` header authentication; 401 unauthenticated & 403 cross-tenant isolation |
+| **Document Ingestion Pipeline** | ✅ | SHA-256 deduplication, PyPDF/markdown extractors, sliding-window chunking (512/64) |
+| **Background Processing Queue** | ✅ | FastAPI `BackgroundTasks` with independent `async_session_factory` sessions |
+| **Dense Semantic Search** | ✅ | 384-dimensional FastEmbed (`BAAI/bge-small-en-v1.5`) on ONNX Runtime |
+| **Sparse BM25 Search & In-Memory Cache** | ✅ | `rank-bm25` BM25Okapi with hash-invalidated LRU caching |
+| **Reciprocal Rank Fusion (RRF)** | ✅ | Formula-based candidate blending with constant $k=60$ |
+| **Cross-Encoder Reranker** | ✅ | `cross-encoder/ms-marco-MiniLM-L-6-v2` delivering **1.00 MRR** with fallback |
+| **Grounded RAG with Provenance** | ✅ | Synthesizes grounded answers with inline citations `[1]` and start/end character offsets |
+| **50-Query Parameter Sweep Benchmark** | ✅ | Automated CLI benchmark measuring Hit@k, MRR, P50/P95 latencies, and unsupported claims |
+| **Docker & Docker Compose** | ✅ | Multi-stage build on `python:3.11-slim`, non-root user `devpilot`, persisted storage |
+| **Continuous Integration (CI)** | ✅ | GitHub Actions workflow executing linting, `pytest`, and benchmark verification |
 
 ---
 
-## Architecture Highlights (4-Week Build)
+## Architecture
 
 ```
-                       ┌────────────────────────────────────────────────────┐
-  HTTP Client          │              DevPilot FastAPI Application           │
-  ─────────────────►   │                                                    │
-                       │  Pydantic v2       FastAPI Router       Uvicorn    │
-                       │  (Validation)    (async endpoints)   (ASGI server) │
-                       └───────────────────────┬────────────────────────────┘
-                                               │
-                ┌──────────────────────────────▼──────────────────────────────┐
-                │                    Service Layer                             │
-                │                                                              │
-                │  LocalStorageService   EmbeddingService    LLMService       │
-                │  (SHA-256, aiofiles)  (fastembed/BGE-384) (httpx/mock)     │
-                │                                                              │
-                │  chunk_text()          lexical_keyword_search()             │
-                │  (sliding window)      (TF token overlap)                  │
-                └──────────────────────────────┬───────────────────────────── ┘
-                                               │
-                ┌──────────────────────────────▼──────────────────────────────┐
-                │         SQLAlchemy 2.0 Async ORM + Alembic Migrations       │
-                │                                                              │
-                │   Project  Document  DocumentChunk  ProcessingJob           │
-                │                                                              │
-                │         SQLite (dev)  /  PostgreSQL (prod)                  │
-                └─────────────────────────────────────────────────────────────┘
+                       ┌────────────────────────────────────────────────────────┐
+  Client Request       │              DevPilot FastAPI Application              │
+  (X-API-Key Header)   │                                                        │
+  ──────────────────►  │   Security Guard       FastAPI Router       Uvicorn    │
+                       │   (401/403 Tenant)   (Async Endpoints)   (ASGI Server) │
+                       └───────────────────────────┬────────────────────────────┘
+                                                   │
+                    ┌──────────────────────────────┴──────────────────────────────┐
+                    │                      Service Layer                          │
+                    │                                                             │
+                    │  LocalStorageService      EmbeddingService (FastEmbed 384) │
+                    │  (SHA-256, 10MB limit)    BM25Okapi Sparse Retriever        │
+                    │                           Reciprocal Rank Fusion (RRF k=60) │
+                    │  chunk_text(512, 64)      Cross-Encoder Reranker (MiniLM)   │
+                    │  (Sliding Window)         LLMService (Grounded + Citations) │
+                    └──────────────────────────────┬──────────────────────────────┘
+                                                   │
+                    ┌──────────────────────────────┴──────────────────────────────┐
+                    │          SQLAlchemy 2.0 Async ORM & Data Layer              │
+                    │                                                             │
+                    │   Project (tenant_id)     DocumentChunk (384-dim vector)    │
+                    │   Document (file metadata) ProcessingJob (PENDING/COMPLETED)│
+                    │                                                             │
+                    │         PostgreSQL 16 (Prod/Docker) / SQLite (Test)         │
+                    └─────────────────────────────────────────────────────────────┘
 ```
 
-**Background Ingestion Pipeline:**
-```
-POST /upload ──► SHA-256 dedup ──► Save file ──► DB: Document + Job (PENDING)
-                                                           │
-                                          FastAPI BackgroundTask
-                                                           │
-                                     Extract text (PDF/TXT/MD/PY)
-                                                           │
-                                     Sliding-window chunker (500c / 50c overlap)
-                                                           │
-                                     EmbeddingService → 384-dim BGE vectors
-                                                           │
-                                     Bulk-insert DocumentChunk rows
-                                                           │
-                                          Job → COMPLETED
+### Retrieval & Ingestion Pipeline
+
+1. **Ingestion Flow:**
+   ```
+   POST /documents/upload ──► Validate X-API-Key & Tenant ──► Save File (SHA-256) ──► Enqueue Job
+                                                                                          │
+                                                        FastAPI BackgroundTask ◄──────────┘
+                                                                │
+                                            Extract Text (PDF/MD/TXT/PY)
+                                                                │
+                                            Sliding Window Chunker (512c, 64c overlap)
+                                                                │
+                                            Generate 384-d FastEmbed Vectors
+                                                                │
+                                            Persist DocumentChunk rows ──► Job COMPLETED
+   ```
+
+2. **Hybrid RAG Flow:**
+   ```
+   POST /projects/{id}/rag ──► Validate Tenant Access
+                                     │
+                 ┌───────────────────┴───────────────────┐
+                 ▼                                       ▼
+        Dense Vector Similarity                 Sparse BM25 Keyword Search
+        (Cosine distance, FastEmbed)            (rank-bm25, in-memory cache)
+                 │                                       │
+                 └───────────────────┬───────────────────┘
+                                     ▼
+                      Reciprocal Rank Fusion (RRF, k=60)
+                                     ▼
+                      Cross-Encoder Reranker (ms-marco-MiniLM)
+                                     ▼
+                      Grounded LLM Answer Synthesis + Citations [1]
+   ```
+
+---
+
+## Benchmark Results (50-Query Gold Standard)
+
+Empirical results from the 50-query parameter sweep ([`benchmarks/gold_standard_50.jsonl`](benchmarks/gold_standard_50.jsonl)) persisted to [`artifacts/benchmark_results.json`](artifacts/benchmark_results.json):
+
+| Retrieval Mode | Chunk Size | Top-K | Hit@k | MRR | P50 Ret (ms) | P95 Ret (ms) | P50 Gen (ms) | P95 Gen (ms) | Unsupported Claims |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **`vector_only`** | 512 | 3 | **1.00** | 0.97 | **6.83** | **10.04** | 0.04 | 0.05 | 23.67% |
+| **`hybrid`** | 512 | 3 | **1.00** | 0.95 | **7.20** | **9.57** | 0.04 | 0.05 | 24.00% |
+| **`hybrid_rerank`** | 512 | 3 | **1.00** | **1.00** | 125.68 | 184.29 | 0.05 | 0.06 | 26.00% |
+| **`vector_only`** | 512 | 5 | **1.00** | 0.97 | **7.19** | **9.72** | 0.05 | 0.06 | 28.17% |
+| **`hybrid`** | 512 | 5 | **1.00** | 0.95 | **7.28** | **10.40** | 0.04 | 0.06 | 28.33% |
+| **`hybrid_rerank`** | 512 | 5 | **1.00** | **1.00** | 143.50 | 173.35 | 0.05 | 0.07 | 29.50% |
+
+> See [`BENCHMARK.md`](BENCHMARK.md) for the full report, mathematical metric definitions, and architectural trade-off analysis.
+
+---
+
+## Quickstart with Docker Compose
+
+The fastest way to run DevPilot locally with PostgreSQL and persistent storage volumes:
+
+### 1. Launch Services
+```bash
+docker compose up -d --build
 ```
 
-**RAG Pipeline:**
+### 2. Verify Health
+```bash
+curl http://localhost:8000/api/v1/health
 ```
-POST /rag ──► Vector retrieval (cosine similarity, multi-tenant) ──► Top-k chunks
-                                                                           │
-                                             Grounded LLM synthesis (httpx → Groq/OpenAI)
-                                             System prompt: "Answer ONLY from excerpts [1],[2]..."
-                                                                           │
-                                          Answer + Citations (chunk_id, filename, offsets)
-                                       OR "I do not have enough information..."
+
+Output:
+```json
+{"status": "healthy", "service": "DevPilot", "version": "0.1.0", "database": "connected"}
+```
+
+- **Interactive Swagger Docs:** http://localhost:8000/docs
+- **ReDoc API Spec:** http://localhost:8000/redoc
+
+### 3. Stop Containers
+```bash
+docker compose down
+```
+
+---
+
+## Local Development Setup
+
+### 1. Prerequisites
+- **Python 3.11+**
+- Git
+
+### 2. Virtual Environment & Dependencies
+```bash
+python -m venv .venv
+source .venv/bin/activate       # On Linux/macOS
+# .\.venv\Scripts\Activate.ps1  # On Windows PowerShell
+
+python -m pip install --upgrade pip
+pip install -r requirements-dev.txt
+```
+
+### 3. Environment Configuration
+```bash
+cp .env.example .env
+```
+
+### 4. Database Migrations
+```bash
+alembic upgrade head
+```
+
+### 5. Run the Application
+```bash
+uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+### 6. Run Test Suite & Benchmark Runner
+```bash
+# Run all 48 automated tests
+pytest -v
+
+# Run the 50-query retrieval benchmark parameter sweep
+python -m src.evaluation.runner --dataset benchmarks/gold_standard_50.jsonl --sweep --mock-llm
 ```
 
 ---
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|:------:|:---------|:------------|
-| `GET` | `/api/v1/health` | Health check with live DB ping |
-| `POST` | `/api/v1/projects` | Create a new project |
-| `GET` | `/api/v1/projects` | List all projects (paginated) |
-| `GET` | `/api/v1/projects/{id}` | Get project by ID |
-| `PATCH` | `/api/v1/projects/{id}` | Update project metadata |
-| `DELETE` | `/api/v1/projects/{id}` | Delete project (cascades chunks) |
-| `POST` | `/api/v1/documents/upload` | Upload file → auto-ingest background job |
-| `GET` | `/api/v1/documents` | List documents (filter by project_id) |
-| `GET` | `/api/v1/documents/{id}` | Get document by ID |
-| `PATCH` | `/api/v1/documents/{id}` | Update document metadata |
-| `DELETE` | `/api/v1/documents/{id}` | Delete document |
-| `GET` | `/api/v1/jobs/{id}` | Poll processing job status |
-| `GET` | `/api/v1/jobs` | List jobs (filter by project/status) |
-| `POST` | `/api/v1/projects/{id}/search` | Semantic vector search over project chunks |
-| `POST` | `/api/v1/projects/{id}/rag` | Grounded RAG with citation provenance |
+All protected endpoints require an authenticated `X-API-Key` header:
 
----
-
-## Quickstart
-
-### 1. Prerequisites
-- **Python 3.11+** (tested on Python 3.13)
-- Windows PowerShell or Bash (Linux/macOS)
-
-### 2. Virtual Environment
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements-dev.txt
-```
-
-### 3. Environment Configuration
-
-Copy the example file and edit as needed:
-```powershell
-Copy-Item .env.example .env
-```
-
-**Minimal `.env` for local development (SQLite, offline mode):**
-```ini
-DATABASE_URL=sqlite+aiosqlite:///./devpilot.db
-```
-
-**Full `.env` with live LLM (OpenAI-compatible, e.g. Groq):**
-```ini
-# Database — SQLite for local dev, PostgreSQL for production
-DATABASE_URL=sqlite+aiosqlite:///./devpilot.db
-
-# LLM Provider (OpenAI-compatible API)
-LLM_API_KEY=gsk_your_groq_api_key_here
-LLM_MODEL=llama-3.3-70b-versatile
-LLM_BASE_URL=https://api.groq.com/openai/v1
-```
-
-> **Offline mode:** If `LLM_API_KEY` is empty, the RAG endpoint uses a deterministic keyword-based mock generator — no API key or network required.
-
-**Supported LLM providers:**
-
-| Provider | `LLM_BASE_URL` | Example `LLM_MODEL` |
-|:---------|:--------------|:---------------------|
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| Ollama (local) | `http://localhost:11434/v1` | `llama3` |
-
-### 4. Database Initialization
-
-```powershell
-# Apply all Alembic migrations
-.\.venv\Scripts\alembic.exe upgrade head
-```
-
-### 5. Run the Server
-
-```powershell
-.\.venv\Scripts\uvicorn.exe src.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-- **Swagger UI:** http://127.0.0.1:8000/docs
-- **ReDoc:** http://127.0.0.1:8000/redoc
-- **Health:** http://127.0.0.1:8000/api/v1/health
-
-### 6. Run Tests
-
-```powershell
-.\.venv\Scripts\pytest.exe -v
-```
-
-All 37 integration tests run with isolated in-memory SQLite — zero external service dependencies.
-
----
-
-## Technology Stack
-
-| Layer | Technologies |
-|:------|:-------------|
-| **Framework** | FastAPI 0.115+, Starlette, Uvicorn |
-| **Data Validation** | Pydantic v2, pydantic-settings |
-| **ORM & Database** | SQLAlchemy 2.0 (async), aiosqlite (dev), asyncpg (prod) |
-| **Migrations** | Alembic (async engine) |
-| **Embeddings** | fastembed (BAAI/bge-small-en-v1.5, 384-dim, ONNX CPU) |
-| **LLM Integration** | httpx async client (OpenAI-compatible) |
-| **File I/O** | python-multipart, aiofiles, pypdf |
-| **Testing** | Pytest, pytest-asyncio, HTTPX ASGITransport |
+| Method | Endpoint | Auth Required | Description |
+|:------:|:---------|:---:|:------------|
+| `GET` | `/api/v1/health` | No | Service status and async database connectivity ping |
+| `POST` | `/api/v1/projects` | Yes | Create a new project (auto-assigned to tenant) |
+| `GET` | `/api/v1/projects` | Yes | List tenant projects (paginated) |
+| `GET` | `/api/v1/projects/{id}` | Yes | Get project by UUID (enforces tenant check) |
+| `PATCH` | `/api/v1/projects/{id}` | Yes | Update project metadata (enforces tenant check) |
+| `DELETE` | `/api/v1/projects/{id}` | Yes | Delete project and cascade documents/chunks |
+| `POST` | `/api/v1/documents/upload` | Yes | Multipart upload → auto-ingest background job |
+| `GET` | `/api/v1/documents` | Yes | List documents (filtered by project or tenant) |
+| `GET` | `/api/v1/documents/{id}` | Yes | Get document metadata by UUID |
+| `PATCH` | `/api/v1/documents/{id}` | Yes | Update document metadata |
+| `DELETE` | `/api/v1/documents/{id}` | Yes | Delete document record |
+| `GET` | `/api/v1/jobs/{id}` | Yes | Poll processing job status (`PENDING` / `COMPLETED`) |
+| `GET` | `/api/v1/jobs` | Yes | List processing jobs (filter by status) |
+| `POST` | `/api/v1/projects/{id}/search` | Yes | Multi-mode semantic search (`vector_only`, `hybrid`, `hybrid_rerank`) |
+| `POST` | `/api/v1/projects/{id}/rag` | Yes | Grounded RAG answer synthesis with citation provenance |
 
 ---
 
@@ -200,78 +213,51 @@ All 37 integration tests run with isolated in-memory SQLite — zero external se
 
 ```text
 e:\Devpilot\
-├── .env.example                      # Template env config
-├── .gitignore                        # Git exclusion rules (secrets, uploads, DB)
-├── BENCHMARK.md                      # Week 4 retrieval benchmark report
+├── .github/workflows/ci.yml          # GitHub Actions CI workflow (lint, test, benchmark)
+├── .dockerignore                     # Docker build exclusions
+├── Dockerfile                        # Multi-stage production container definition
+├── docker-compose.yml                # Compose orchestration with PostgreSQL 16
+├── BENCHMARK.md                      # 50-query benchmark & parameter sweep report
+├── STATUS.md                         # Milestones tracker (Weeks 1–5 complete)
 ├── LOG_DESCRIPTION.md                # 12-week engineering journal
-├── STATUS.md                         # Milestone tracker
 ├── pyproject.toml                    # Project metadata & tool config
 ├── requirements.txt                  # Production dependencies
-├── requirements-dev.txt              # Dev/test dependencies
-├── alembic/                          # Async migration environment
+├── requirements-dev.txt              # Testing and development dependencies
+├── alembic/                          # Async database migrations
+├── benchmarks/
+│   ├── gold_standard_50.jsonl        # 50-query evaluation benchmark dataset
+│   └── eval_data.jsonl               # Baseline 5-query dataset
+├── artifacts/
+│   └── benchmark_results.json        # Latest persisted benchmark evaluation results
 ├── src/
-│   ├── main.py                       # FastAPI app entrypoint & lifespan
+│   ├── main.py                       # FastAPI application factory & lifespan
 │   ├── core/
-│   │   ├── config.py                 # Pydantic-settings BaseSettings
-│   │   ├── database.py               # AsyncEngine, session factory
-│   │   └── exceptions.py             # Domain exceptions & handlers
+│   │   ├── config.py                 # Centralized settings (chunk size 512, overlap 64)
+│   │   ├── database.py               # AsyncEngine & async_session_factory
+│   │   ├── security.py               # X-API-Key auth & tenant isolation verification
+│   │   └── exceptions.py             # Custom domain exceptions
 │   ├── models/                       # SQLAlchemy 2.0 ORM models
-│   │   ├── project.py
-│   │   ├── document.py
-│   │   ├── document_chunk.py         # 384-dim vector storage (JSON)
-│   │   └── processing_job.py         # JobStatus enum & lifecycle
-│   ├── schemas/                      # Pydantic v2 request/response schemas
-│   │   ├── search.py
-│   │   └── rag.py                    # Citation, RagQueryRequest, RagResponse
+│   │   ├── project.py                # Project with tenant_id and owner_api_key
+│   │   ├── document.py               # Document metadata
+│   │   ├── document_chunk.py         # 384-dim vector chunk storage
+│   │   └── processing_job.py         # ProcessingJob & JobStatus enum
+│   ├── schemas/                      # Pydantic v2 validation schemas
 │   ├── services/
-│   │   ├── storage.py                # SHA-256 dedup, extension validation
-│   │   ├── extractor.py              # PDF/MD/TXT/PY text extraction
-│   │   ├── chunker.py                # Sliding-window chunker (500c/50c)
-│   │   ├── embedding.py              # fastembed async service
-│   │   ├── search.py                 # Keyword lexical retriever
-│   │   └── llm.py                    # Grounded LLM service (httpx + mock)
+│   │   ├── storage.py                # LocalStorageService (SHA-256, 10MB limit)
+│   │   ├── extractor.py              # PDF/MD/TXT/PY file text extraction
+│   │   ├── chunker.py                # Sliding-window chunker (512/64)
+│   │   ├── embedding.py              # FastEmbed BGE-384 async service
+│   │   ├── retrieval/                # Advanced retrieval subsystem
+│   │   │   ├── hybrid.py             # BM25Okapi, RRF (k=60), in-memory cache
+│   │   │   ├── pipeline.py           # Unified multi-mode search pipeline
+│   │   │   └── reranker.py           # Cross-encoder reranker with fallback
+│   │   └── llm.py                    # Grounded answer synthesis & citations
 │   ├── evaluation/
-│   │   └── benchmark.py              # Recall@k, MRR, BenchmarkRunner
-│   └── api/v1/endpoints/
-│       ├── documents.py              # Upload + background ingestion
-│       ├── search.py                 # Semantic search endpoint
-│       └── rag.py                    # Grounded RAG endpoint
-├── storage/uploads/                  # Binary file storage (gitignored)
-└── tests/
-    ├── conftest.py                   # Fixtures: in-memory DB + session patch
-    ├── test_health.py
-    ├── test_projects.py
-    ├── test_documents.py
-    ├── test_jobs.py
-    ├── test_ingestion.py
-    ├── test_search.py
-    └── test_rag.py                   # RAG + benchmark + keyword tests
+│   │   ├── runner.py                 # Benchmark runner & parameter sweep CLI
+│   │   └── metrics.py                # Hit@k, MRR, latency, unsupported claims rate
+│   └── api/v1/endpoints/             # REST endpoints (auth, projects, docs, search, rag)
+└── tests/                            # 48 integration tests (100% green)
 ```
-
----
-
-## Benchmark Summary
-
-See [`BENCHMARK.md`](BENCHMARK.md) for the full report. Key results:
-
-| Metric | Keyword Retrieval | Vector Retrieval |
-|:-------|:-----------------:|:----------------:|
-| Recall@1 | 0.625 | **0.875** |
-| Recall@3 | 0.750 | **1.000** |
-| MRR | 0.698 | **0.917** |
-
-Vector retrieval outperforms on paraphrase and concept queries. Keyword retrieval retains advantage on exact identifier lookups. Hybrid BM25 + Dense search planned for Week 5.
-
----
-
-## Engineering Journal
-
-See [`LOG_DESCRIPTION.md`](LOG_DESCRIPTION.md) for the full 12-week engineering log including:
-- ASCII architecture flow diagrams for each milestone
-- Keyword vs. Vector trade-off analysis with empirical benchmarks
-- Live Swagger UI E2E verification notes
-- Interview cheat sheets for every week
-- Documented failure modes and Week 5 mitigations
 
 ---
 

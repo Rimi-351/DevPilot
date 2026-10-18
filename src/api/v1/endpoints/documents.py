@@ -18,7 +18,9 @@ from fastapi import (
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import settings
 from src.core.database import async_session_factory, get_db
+from src.core.security import get_current_api_key, verify_project_tenant_access
 from src.models.document import Document
 from src.models.document_chunk import DocumentChunk
 from src.models.processing_job import JobStatus, ProcessingJob
@@ -74,8 +76,8 @@ async def process_document_background(
             # Extract text
             text = await extract_text_from_file(file_path, file_type=file_type)
 
-            # Chunk
-            chunks = chunk_text(text)
+            # Chunk using centralized settings
+            chunks = chunk_text(text, chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP)
             chunk_dicts = [c.to_dict() for c in chunks]
 
             # Embed
@@ -129,6 +131,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     project_id: UUID = Form(..., description="Target Project ID"),
     file: UploadFile = File(..., description="File binary (.pdf, .md, .txt, .py)"),
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentUploadResponse:
     """Ingest a multipart file, store binary, create metadata, and queue extraction."""
@@ -139,6 +142,7 @@ async def upload_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project with ID '{project_id}' does not exist.",
         )
+    verify_project_tenant_access(project, api_key)
 
     # 2. Read content
     content = await file.read()
@@ -214,6 +218,7 @@ async def upload_document(
 )
 async def create_document(
     document_in: DocumentCreate,
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> Document:
     """Register a new document associated with a project."""
@@ -223,6 +228,7 @@ async def create_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project with ID '{document_in.project_id}' does not exist.",
         )
+    verify_project_tenant_access(project, api_key)
 
     document = Document(
         project_id=document_in.project_id,
@@ -247,17 +253,41 @@ async def list_documents(
     project_id: Optional[UUID] = Query(default=None, description="Filter by project ID"),
     page: int = Query(default=1, ge=1, description="Page number"),
     page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Retrieve paginated list of documents."""
+    """Retrieve paginated list of documents with tenant isolation."""
     offset = (page - 1) * page_size
 
-    total_query = select(func.count()).select_from(Document)
-    data_query = select(Document).order_by(Document.created_at.desc())
-
     if project_id:
-        total_query = total_query.where(Document.project_id == project_id)
-        data_query = data_query.where(Document.project_id == project_id)
+        project = await db.get(Project, project_id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project with ID '{project_id}' does not exist.",
+            )
+        verify_project_tenant_access(project, api_key)
+
+        total_query = select(func.count()).select_from(Document).where(Document.project_id == project_id)
+        data_query = select(Document).where(Document.project_id == project_id).order_by(Document.created_at.desc())
+    else:
+        tenant_filter = (
+            (Project.tenant_id == api_key)
+            | (Project.owner_api_key == api_key)
+            | (Project.tenant_id.is_(None))
+        )
+        total_query = (
+            select(func.count())
+            .select_from(Document)
+            .join(Project, Document.project_id == Project.id)
+            .where(tenant_filter)
+        )
+        data_query = (
+            select(Document)
+            .join(Project, Document.project_id == Project.id)
+            .where(tenant_filter)
+            .order_by(Document.created_at.desc())
+        )
 
     total_result = await db.execute(total_query)
     total = total_result.scalar_one()
@@ -285,6 +315,7 @@ async def list_documents(
 )
 async def get_document(
     document_id: UUID,
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> Document:
     """Retrieve a document by its UUID."""
@@ -294,6 +325,9 @@ async def get_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID '{document_id}' not found.",
         )
+    project = await db.get(Project, document.project_id)
+    if project:
+        verify_project_tenant_access(project, api_key)
     return document
 
 
@@ -306,6 +340,7 @@ async def get_document(
 async def update_document(
     document_id: UUID,
     document_in: DocumentUpdate,
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> Document:
     """Update metadata for an existing document."""
@@ -315,6 +350,9 @@ async def update_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID '{document_id}' not found.",
         )
+    project = await db.get(Project, document.project_id)
+    if project:
+        verify_project_tenant_access(project, api_key)
 
     update_data = document_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -332,6 +370,7 @@ async def update_document(
 )
 async def delete_document(
     document_id: UUID,
+    api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Delete a document record."""
@@ -341,4 +380,7 @@ async def delete_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document with ID '{document_id}' not found.",
         )
+    project = await db.get(Project, document.project_id)
+    if project:
+        verify_project_tenant_access(project, api_key)
     await db.delete(document)
