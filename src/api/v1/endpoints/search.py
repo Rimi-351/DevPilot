@@ -74,7 +74,48 @@ async def search_project_documents(
 
     # 4. Rank chunks based on selected retrieval mode
     scored_results: list[SearchChunkResult] = []
-    if request.mode == "keyword":
+    if request.mode in ("hybrid", "hybrid_rerank"):
+        from src.services.retrieval import retrieve_chunks
+
+        candidate_chunks = [
+            {
+                "chunk_id": chunk.id,
+                "document_id": chunk.document_id,
+                "filename": filename,
+                "content": chunk.content,
+                "start_offset": chunk.start_offset,
+                "end_offset": chunk.end_offset,
+                "chunk_index": chunk.chunk_index,
+                "embedding": chunk.embedding or [],
+            }
+            for chunk, filename in rows
+        ]
+        retrieved = await retrieve_chunks(
+            query=request.query,
+            chunks=candidate_chunks,
+            search_mode=request.mode,
+            top_k=request.top_k,
+        )
+        for c in retrieved:
+            final_score = float(c.get("rerank_score", c.get("rrf_score", c.get("score", 0.0))))
+            scored_results.append(
+                SearchChunkResult(
+                    chunk_id=c["chunk_id"],
+                    document_id=c["document_id"],
+                    filename=c["filename"],
+                    content=c["content"],
+                    score=round(final_score, 6),
+                    start_offset=c["start_offset"],
+                    end_offset=c["end_offset"],
+                    chunk_index=c["chunk_index"],
+                )
+            )
+        return SearchResponse(
+            query=request.query,
+            total_results=len(scored_results),
+            results=scored_results,
+        )
+    elif request.mode == "keyword":
         # Keyword baseline: compute lexical overlap scores
         from src.services.search import lexical_keyword_search
         # Extract pure DocumentChunk objects

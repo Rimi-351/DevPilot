@@ -1,12 +1,48 @@
 # DevPilot Project Status
 
-**Current Target:** Week 5 — Search Quality  
-**Status:** Week 4 COMPLETE — Portfolio Milestone Achieved  
-**Last Verified:** `.venv\Scripts\pytest.exe -v` → **37/37 integration tests passing, 0 warnings**  
+**Current Target:** Week 6 — Production Readiness & Monitoring  
+**Status:** Week 5 COMPLETE — Advanced Retrieval & Benchmark Milestone Achieved  
+**Last Verified:** `.venv\Scripts\pytest.exe -v` → **44/44 integration tests passing, 0 warnings**  
 
 ---
 
 ## Completed Deliverables
+
+### Week 5 — Search Quality & Reproducible Benchmark (Completed)
+
+1. **Dependencies & Reranker Packages**
+   - Added `rank-bm25>=0.2.2` and `sentence-transformers>=3.0.0` with `torch` to `requirements.txt` and `pyproject.toml`.
+
+2. **Hybrid Search & Reciprocal Rank Fusion (`src/services/retrieval/hybrid.py`)**
+   - Implemented `bm25_search()` using `rank_bm25.BM25Okapi` with lowercase alphanumeric tokenization.
+   - Implemented `reciprocal_rank_fusion(dense_results, sparse_results, k=60, top_n=10)` using RRF scoring:
+     $$RRF\_Score(d) = \sum \frac{1}{k + rank + 1}$$
+   - Unified deduplication by chunk ID while accumulating scores.
+
+3. **In-Memory BM25 Index Caching (`src/services/retrieval/hybrid.py`)**
+   - Added `_bm25_cache: dict[str, tuple[int, BM25Okapi, list[dict]]]` keyed by `project_id` or corpus hash.
+   - Re-tokenization occurs only when corpus size or chunk content changes, eliminating repeated tokenization overhead.
+
+4. **Cross-Encoder Reranker (`src/services/retrieval/reranker.py`)**
+   - Implemented `RerankerService` utilizing `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+   - Predicts joint `(query, passage)` cross-attention relevance scores, attaching `rerank_score`.
+   - Lazy model loading with heuristic fallback for offline or restricted environments.
+
+5. **Multi-Mode Retrieval Pipeline (`src/services/retrieval/pipeline.py`)**
+   - Unified `retrieve_chunks()` supporting `vector_only`, `hybrid`, and `hybrid_rerank` modes.
+   - Integrated into `POST /api/v1/projects/{project_id}/rag` and `POST /api/v1/projects/{project_id}/search`.
+   - Added `search_mode` and `chunk_limit` parameters to `RagQueryRequest` and `SearchQueryRequest`.
+
+6. **Reproducible Benchmark Runner (`src/evaluation/runner.py`)**
+   - CLI evaluation tool measuring Hit@k, MRR, P50/P95 latencies, and unsupported claims rate.
+   - CLI aliases: `--dataset` / `--data-path`, `--chunk-size` (default 512), and `--enable-reranker`.
+   - Results persisted to `artifacts/benchmark_results.json`.
+
+7. **Test Coverage (`tests/test_retrieval.py`)**
+   - Added 8 unit/integration tests covering tokenization, BM25 ranking, RRF calculation, reranker ordering, pipeline modes, unsupported claims metrics, and BM25 index caching.
+   - Test suite expanded to **44 tests passing**.
+
+---
 
 ### Week 4 — Grounded RAG, Citations & AI Evaluation (Completed)
 

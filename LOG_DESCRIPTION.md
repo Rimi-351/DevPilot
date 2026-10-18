@@ -195,3 +195,76 @@ User Query ──► Keyword OR Vector Retrieval ──► Provenance Context Wi
 
 #### 💡 Interview Cheat Sheet
 > *"In Week 4, I implemented grounded Retrieval-Augmented Generation (RAG) and a dual-mode retrieval evaluation harness in DevPilot. I engineered an asynchronous LLM service supporting both OpenAI-compatible endpoints and deterministic offline mock generators. The RAG pipeline retrieves top-k project chunks via vector similarity, labels context excerpts as [1], [2], and instructs the model to answer solely using provided excerpts or politely refuse when evidence is lacking. I also built a keyword lexical baseline retriever for benchmarking, a BenchmarkRunner computing Recall@k and MRR across 8 dataset items including 3 explicit failure scenarios, and confirmed live E2E grounded generation and strict multi-tenant isolation via Swagger UI. All 37 integration tests pass with zero warnings."*
+
+---
+
+### 🔹 Week 5: Improve Retrieval Quality & Reproducible Benchmark
+
+```
+User Query
+    │
+    ├──► Dense Vector Search (FastEmbed BGE-small-en-v1.5) ──┐
+    │                                                        ├──► Reciprocal Rank Fusion (RRF, k=60)
+    └──► Sparse Lexical Search (Rank-BM25 with index cache) ─┘        │
+                                                                      ▼
+                                                        Top-N Fused Candidate Chunks
+                                                                      │
+                                                                      ▼
+                                                        Cross-Encoder Reranker
+                                                        (ms-marco-MiniLM-L-6-v2)
+                                                                      │
+                                                                      ▼
+                                                        Top-K Grounded Excerpts
+                                                                      │
+                                                                      ▼
+                                                        Grounded LLM Generation
+```
+
+#### 1. Key Accomplishments & Deliverables
+
+- **Hybrid Search via Reciprocal Rank Fusion (`src/services/retrieval/hybrid.py`):**
+  - Combined semantic dense vector cosine similarity with lexical sparse BM25 scoring (`rank-bm25`).
+  - Implemented Reciprocal Rank Fusion:
+    $$RRF\_Score(d) = \sum_{m \in \{\text{dense}, \text{sparse}\}} \frac{1}{k + \text{rank}(d) + 1} \quad (k=60)$$
+  - Unified candidate deduplication by chunk ID, preserving metadata and attaching computed `rrf_score`.
+
+- **In-Memory BM25 Index Caching:**
+  - Designed `_bm25_cache: dict[str, tuple[int, BM25Okapi, list[dict]]]` to eliminate tokenization and index reconstruction bottlenecks.
+  - Generates deterministic cache keys based on `project_id` or corpus chunk identifier hashes.
+  - Re-tokenization occurs only when the corpus length or chunks change, yielding sub-50ms retrieval latencies on repeat queries.
+
+- **Cross-Encoder Reranker (`src/services/retrieval/reranker.py`):**
+  - Integrated `cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers` for deep query-passage cross-attention scoring.
+  - Implemented `RerankerService.rerank(query, candidates, top_k)` predicting joint relevance scores and attaching `rerank_score`.
+  - Built-in lazy loading and heuristic fallback mechanism ensures resilient execution in offline or resource-constrained environments.
+
+- **Unified Multi-Mode Retrieval Pipeline (`src/services/retrieval/pipeline.py`):**
+  - Created `retrieve_chunks()` supporting three retrieval paradigms:
+    1. `"vector_only"`: Fast dense embedding search.
+    2. `"hybrid"`: Dense + BM25 sparse search merged via RRF.
+    3. `"hybrid_rerank"`: Dense + BM25 (RRF candidates) followed by Cross-Encoder reranking.
+  - Integrated into `POST /api/v1/projects/{project_id}/rag` and `POST /api/v1/projects/{project_id}/search` with schema validation (`search_mode`, `chunk_limit`, `top_k`).
+
+- **Reproducible Benchmark Runner (`src/evaluation/runner.py`):**
+  - CLI benchmark runner (`python -m src.evaluation.runner`) evaluating:
+    - **Hit@k**: Binary relevance success rate for ground-truth chunks in retrieved results.
+    - **MRR (Mean Reciprocal Rank)**: Reciprocal rank of first matching ground-truth chunk.
+    - **Latency Percentiles**: P50 and P95 latency measurements for retrieval and generation stages.
+    - **Unsupported Claims Rate**: Lexical verification detecting answer tokens unsupported by retrieved context.
+  - Added CLI flag aliases: `--dataset` (alias for `--data-path`), `--chunk-size` (default 512), and `--enable-reranker` (runs in `hybrid_rerank` mode).
+  - Maintained benchmark datasets (`benchmarks/eval_data.jsonl`, `benchmarks/gold_standard.jsonl`) and persisted run artifacts to `artifacts/benchmark_results.json`.
+
+- **Comprehensive Test Suite:**
+  - 44 tests pass cleanly (37 integration/system tests + 7 dedicated retrieval/benchmark tests in `tests/test_retrieval.py` testing BM25 ranking, RRF scoring, reranker ordering, pipeline modes, and BM25 index caching).
+
+#### 2. Benchmark Evaluation Summary
+
+| Retrieval Mode | Hit@k (k=3) | MRR | P50 Ret (ms) | P95 Ret (ms) | P50 Gen (ms) | P95 Gen (ms) | Unsupported Claims |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Vector Only** | 1.00 | 1.00 | 50.46 | 1600.63 | 1152.25 | 1322.19 | 31.42% |
+| **Hybrid (RRF)** | 1.00 | 1.00 | 47.74 | 66.07 | 1103.06 | 1279.50 | 31.42% |
+| **Hybrid + Rerank** | 1.00 | 1.00 | 170.71 | 17157.27 | 957.38 | 1213.85 | 29.24% |
+
+#### 💡 Interview Cheat Sheet
+> *"In Week 5, I evolved DevPilot's retrieval architecture from basic bi-encoder vector search to an advanced two-stage hybrid retrieval and reranking pipeline. I implemented BM25 sparse search using rank-bm25 combined with dense semantic embeddings via Reciprocal Rank Fusion (RRF, k=60). To prevent redundant re-indexing on every query, I engineered an in-memory BM25 index cache with deterministic cache keys based on project IDs and chunk hashes. For second-stage scoring, I integrated a cross-encoder (ms-marco-MiniLM-L-6-v2) that evaluates joint query-passage attention, backed by a lazy loader and resilient heuristic fallback. I also built a reproducible CLI evaluation runner measuring Hit@k, MRR, P50/P95 latencies, and unsupported claims rates, persisting benchmark results to JSON. The entire 44-test suite passes with 100% green status."*
+

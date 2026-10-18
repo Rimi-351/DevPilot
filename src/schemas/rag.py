@@ -21,6 +21,16 @@ class RagQueryRequest(BaseModel):
         le=1.0,
         description="LLM generation temperature (0.0 for deterministic grounding)",
     )
+    search_mode: str = Field(
+        default="vector_only",
+        description="Retrieval search mode: 'vector_only', 'hybrid', or 'hybrid_rerank'",
+    )
+    chunk_limit: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Candidate pool size for initial retrieval before RRF or reranking",
+    )
 
 
 class Citation(BaseModel):
@@ -48,4 +58,8 @@ class RagResponse(BaseModel):
     chunks_evaluated: int = Field(
         ...,
         description="Total number of retrieved context chunks evaluated",
+    )
+    search_mode: str = Field(
+        default="vector_only",
+        description="Search mode executed for retrieval",
     )

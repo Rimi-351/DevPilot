@@ -16,9 +16,9 @@ class SearchQueryRequest(BaseModel):
         le=20,
         description="Maximum number of relevant chunks to return",
     )
-    mode: Literal["keyword", "vector"] = Field(
+    mode: Literal["keyword", "vector", "hybrid", "hybrid_rerank"] = Field(
         default="vector",
-        description="Retrieval mode: keyword baseline or vector semantic",
+        description="Retrieval mode: keyword, vector, hybrid, or hybrid_rerank",
     )
 
 

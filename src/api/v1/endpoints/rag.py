@@ -38,11 +38,7 @@ async def generate_rag_answer(
             detail=f"Project with ID '{project_id}' does not exist.",
         )
 
-    # 2. Generate query embedding
-    embedding_service = get_embedding_service()
-    query_vector = await embedding_service.generate_query_embedding(request.query)
-
-    # 3. Retrieve chunks belonging to project joined with Document for filename
+    # 2. Retrieve chunks belonging to project joined with Document for filename
     stmt = (
         select(DocumentChunk, Document.filename)
         .join(Document, DocumentChunk.document_id == Document.id)
@@ -51,29 +47,37 @@ async def generate_rag_answer(
     result = await db.execute(stmt)
     rows = result.all()
 
-    # 4. Rank chunks by cosine similarity
-    scored_rows: list[tuple[DocumentChunk, str, float]] = []
+    # 3. Format candidate chunk dictionaries
+    candidate_chunks: list[dict] = []
     for chunk, filename in rows:
-        chunk_embedding = chunk.embedding or []
-        score = compute_cosine_similarity(query_vector, chunk_embedding)
-        scored_rows.append((chunk, filename, score))
-
-    scored_rows.sort(key=lambda item: item[2], reverse=True)
-    top_rows = scored_rows[: request.top_k]
-
-    # 5. Format context excerpts with 1-based citation indices [1], [2], ...
-    context_chunks: list[dict] = []
-    for idx, (chunk, filename, score) in enumerate(top_rows, start=1):
-        context_chunks.append({
-            "index": idx,
+        candidate_chunks.append({
             "chunk_id": chunk.id,
             "document_id": chunk.document_id,
             "filename": filename,
             "content": chunk.content,
             "start_offset": chunk.start_offset,
             "end_offset": chunk.end_offset,
-            "score": score,
+            "chunk_index": chunk.chunk_index,
+            "embedding": chunk.embedding or [],
         })
+
+    # 4. Multi-mode retrieval (vector_only, hybrid, or hybrid_rerank)
+    from src.services.retrieval import retrieve_chunks
+
+    ranked_chunks = await retrieve_chunks(
+        query=request.query,
+        chunks=candidate_chunks,
+        search_mode=request.search_mode,
+        top_k=request.top_k,
+        chunk_limit=request.chunk_limit,
+    )
+
+    # 5. Format context excerpts with 1-based citation indices [1], [2], ...
+    context_chunks: list[dict] = []
+    for idx, c in enumerate(ranked_chunks, start=1):
+        item = dict(c)
+        item["index"] = idx
+        context_chunks.append(item)
 
     # 6. Call LLM service to generate grounded answer
     llm_service = get_llm_service()
@@ -102,4 +106,5 @@ async def generate_rag_answer(
         answer=answer,
         citations=citations,
         chunks_evaluated=len(context_chunks),
+        search_mode=request.search_mode,
     )

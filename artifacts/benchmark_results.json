@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-10-18T17:01:26Z",
+  "top_k": 3,
+  "dataset_size": 5,
+  "results": [
+    {
+      "mode": "hybrid_rerank",
+      "top_k": 3,
+      "total_queries": 5,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "p50_retrieval_ms": 170.71,
+      "p95_retrieval_ms": 17157.27,
+      "p50_generation_ms": 957.38,
+      "p95_generation_ms": 1213.85,
+      "unsupported_claims_rate": 0.2924
+    }
+  ]
+}
