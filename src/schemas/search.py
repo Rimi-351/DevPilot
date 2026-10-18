@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -14,6 +15,10 @@ class SearchQueryRequest(BaseModel):
         ge=1,
         le=20,
         description="Maximum number of relevant chunks to return",
+    )
+    mode: Literal["keyword", "vector"] = Field(
+        default="vector",
+        description="Retrieval mode: keyword baseline or vector semantic",
     )
 
 

@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10MB
     ALLOWED_EXTENSIONS: list[str] = [".pdf", ".md", ".txt", ".py"]
 
+    # LLM & RAG Configuration
+    LLM_API_KEY: str = ""
+    LLM_MODEL: str = "openai/gpt-oss-20b"
+    LLM_BASE_URL: str = "https://api.groq.com/openai/v1"
+
 
 @lru_cache
 def get_settings() -> Settings:

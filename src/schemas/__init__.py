@@ -26,6 +26,7 @@ from src.schemas.project import (
     ProjectRead,
     ProjectUpdate,
 )
+from src.schemas.rag import Citation, RagQueryRequest, RagResponse
 
 __all__ = [
     "BaseSchema",
@@ -46,4 +47,7 @@ __all__ = [
     "ProcessingJobCreate",
     "ProcessingJobUpdate",
     "ProcessingJobRead",
+    "RagQueryRequest",
+    "Citation",
+    "RagResponse",
 ]

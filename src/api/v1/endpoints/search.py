@@ -54,9 +54,14 @@ async def search_project_documents(
             detail=f"Project with ID '{project_id}' does not exist.",
         )
 
-    # 2. Generate query embedding
-    embedding_service = get_embedding_service()
-    query_vector = await embedding_service.generate_query_embedding(request.query)
+    # 2. Retrieve or compute query representation based on mode
+    if request.mode == "vector":
+        # Vector mode: generate embedding
+        embedding_service = get_embedding_service()
+        query_vector = await embedding_service.generate_query_embedding(request.query)
+    else:
+        # Keyword mode: no embedding needed
+        query_vector = []
 
     # 3. Fetch all DocumentChunk records belonging to project joined with Document for filename
     stmt = (
@@ -67,23 +72,51 @@ async def search_project_documents(
     result = await db.execute(stmt)
     rows = result.all()
 
-    # 4. Calculate Cosine Similarity between query vector and each chunk embedding
+    # 4. Rank chunks based on selected retrieval mode
     scored_results: list[SearchChunkResult] = []
-    for chunk, filename in rows:
-        chunk_embedding = chunk.embedding or []
-        score = compute_cosine_similarity(query_vector, chunk_embedding)
-        scored_results.append(
-            SearchChunkResult(
-                chunk_id=chunk.id,
-                document_id=chunk.document_id,
-                filename=filename,
-                content=chunk.content,
-                score=round(score, 6),
-                start_offset=chunk.start_offset,
-                end_offset=chunk.end_offset,
-                chunk_index=chunk.chunk_index,
+    if request.mode == "keyword":
+        # Keyword baseline: compute lexical overlap scores
+        from src.services.search import lexical_keyword_search
+        # Extract pure DocumentChunk objects
+        chunks = [chunk for chunk, _ in rows]
+        ranked_chunks = lexical_keyword_search(request.query, chunks)
+        # Map chunk IDs to filenames for provenance
+        chunk_id_to_filename = {chunk.id: filename for chunk, filename in rows}
+        query_tokens = set(re.findall(r"\w+", request.query.lower()))
+        for chunk in ranked_chunks:
+            filename = chunk_id_to_filename.get(chunk.id, "unknown")
+            chunk_tokens = set(re.findall(r"\w+", chunk.content.lower()))
+            overlap = len(query_tokens & chunk_tokens)
+            score = overlap / max(len(query_tokens), 1)
+            scored_results.append(
+                SearchChunkResult(
+                    chunk_id=chunk.id,
+                    document_id=chunk.document_id,
+                    filename=filename,
+                    content=chunk.content,
+                    score=round(score, 6),
+                    start_offset=chunk.start_offset,
+                    end_offset=chunk.end_offset,
+                    chunk_index=chunk.chunk_index,
+                )
             )
-        )
+    else:
+        # Vector mode: original cosine similarity scoring
+        for chunk, filename in rows:
+            chunk_embedding = chunk.embedding or []
+            score = compute_cosine_similarity(query_vector, chunk_embedding)
+            scored_results.append(
+                SearchChunkResult(
+                    chunk_id=chunk.id,
+                    document_id=chunk.document_id,
+                    filename=filename,
+                    content=chunk.content,
+                    score=round(score, 6),
+                    start_offset=chunk.start_offset,
+                    end_offset=chunk.end_offset,
+                    chunk_index=chunk.chunk_index,
+                )
+            )
 
     # 5. Sort descending and pick top_k
     scored_results.sort(key=lambda item: item.score, reverse=True)

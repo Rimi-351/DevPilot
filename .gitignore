@@ -26,9 +26,10 @@ wheels/
 venv/
 ENV/
 
-# Environment Variables
+# Environment Variables & Secrets
 .env
 .env.local
+keys.txt
 
 # Database
 *.sqlite3
@@ -44,3 +45,19 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Storage & Uploads
+storage/uploads/*
+!storage/uploads/.gitkeep
+
+# Diagnostic & one-off scripts (never commit these)
+scripts/check_groq_models.py
+scripts/check_job_chunks.py
+scripts/verify_live_rag.py
+scripts/test_background_upload.py
+scripts/test_real_background.py
+
+# Local manual test artifact files
+company_policy.txt
+policy.txt
+dummy*.txt

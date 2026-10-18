@@ -1,6 +1,7 @@
 """Pytest fixtures for DevPilot async integration testing."""
 
 from collections.abc import AsyncGenerator
+from unittest.mock import patch
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -56,7 +57,12 @@ async def db_session(test_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, N
 
 @pytest_asyncio.fixture
 async def client(test_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
-    """Provide an AsyncClient wired with the test database dependency override."""
+    """Provide an AsyncClient wired with the test database dependency override.
+
+    Also patches ``src.core.database.async_session_factory`` and the module-level
+    reference in ``documents.py`` so that background tasks use the same in-memory
+    SQLite engine as the test, not the production engine.
+    """
     session_factory = async_sessionmaker(
         bind=test_engine,
         class_=AsyncSession,
@@ -78,8 +84,14 @@ async def client(test_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_session_factory] = lambda: session_factory
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+    # Patch the module-level async_session_factory used by process_document_background
+    # so background tasks write to the same in-memory DB as the test.
+    with (
+        patch("src.core.database.async_session_factory", session_factory),
+        patch("src.api.v1.endpoints.documents.async_session_factory", session_factory),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
 
     app.dependency_overrides.clear()

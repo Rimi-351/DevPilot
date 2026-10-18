@@ -16,9 +16,9 @@ from fastapi import (
     status,
 )
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.database import get_db, get_session_factory
+from src.core.database import async_session_factory, get_db
 from src.models.document import Document
 from src.models.document_chunk import DocumentChunk
 from src.models.processing_job import JobStatus, ProcessingJob
@@ -39,39 +39,56 @@ router = APIRouter()
 
 
 async def process_document_background(
-    job_id: UUID,
+    job_id: str,
+    document_id: str,
+    project_id: str,
     file_path: str,
     file_type: str,
-    session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Background task to extract text, calculate chunks, generate embeddings, and persist chunks."""
-    async with session_factory() as session:
+    """Background task: extract text, chunk, embed, and persist DocumentChunk rows.
+    Accepts only plain str args (safe for BackgroundTasks serialisation).
+    Opens its own DB session — never reuses the closed request session.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(">>> BACKGROUND TASK TRIGGERED FOR JOB: %s", job_id)
+
+    job_uuid = UUID(job_id)
+
+    # ── 1. Mark IN_PROGRESS ──────────────────────────────────────────────────
+    async with async_session_factory() as session:
+        job = await session.get(ProcessingJob, job_uuid)
+        if not job:
+            logger.error("ProcessingJob %s not found in DB", job_id)
+            return
+        job.status = JobStatus.IN_PROGRESS
+        await session.commit()
+
+    # ── 2. Process (try/except keeps failures visible) ────────────────────────
+    async with async_session_factory() as session:
+        job = await session.get(ProcessingJob, job_uuid)
+        if not job:
+            logger.error("ProcessingJob %s vanished before processing", job_id)
+            return
         try:
-            job = await session.get(ProcessingJob, job_id)
-            if not job:
-                return
-
-            job.status = JobStatus.IN_PROGRESS
-            await session.commit()
-
-            # Extract content from persisted file
+            # Extract text
             text = await extract_text_from_file(file_path, file_type=file_type)
 
-            # Generate chunks with offsets
+            # Chunk
             chunks = chunk_text(text)
             chunk_dicts = [c.to_dict() for c in chunks]
 
-            # Generate vector embeddings
+            # Embed
             embedding_service = get_embedding_service()
             chunk_texts = [c.content for c in chunks]
             embeddings = await embedding_service.generate_embeddings(chunk_texts)
 
-            # Bulk-insert DocumentChunk rows
-            if chunks and job.document_id and job.project_id:
+            # Persist chunks
+            if chunks:
                 db_chunks = [
                     DocumentChunk(
-                        document_id=job.document_id,
-                        project_id=job.project_id,
+                        document_id=UUID(document_id),
+                        project_id=UUID(project_id),
                         chunk_index=chunk.index,
                         content=chunk.content,
                         start_offset=chunk.start_offset,
@@ -82,27 +99,24 @@ async def process_document_background(
                 ]
                 session.add_all(db_chunks)
 
-            dimensions = len(embeddings[0]) if embeddings and len(embeddings) > 0 else 0
+            dimensions = len(embeddings[0]) if embeddings else 0
             job.status = JobStatus.COMPLETED
             job.result = {
                 "chunks_count": len(chunks),
+                "chunk_count": len(chunks),   # alias for backward compatibility
                 "embedded": True,
                 "dimensions": dimensions,
-                "chunk_count": len(chunks),
                 "total_characters": len(text),
                 "chunks_preview": chunk_dicts[:5],
             }
             await session.commit()
+            logger.info("Job %s COMPLETED — %d chunks persisted", job_id, len(chunks))
+
         except Exception as exc:
-            await session.rollback()
-            try:
-                job = await session.get(ProcessingJob, job_id)
-                if job:
-                    job.status = JobStatus.FAILED
-                    job.error_message = str(exc)
-                    await session.commit()
-            except Exception:
-                pass
+            logger.exception("Background processing failed for job %s", job_id)
+            job.status = JobStatus.FAILED
+            job.error_message = f"{type(exc).__name__}: {exc}"
+            await session.commit()
 
 
 @router.post(
@@ -116,7 +130,6 @@ async def upload_document(
     project_id: UUID = Form(..., description="Target Project ID"),
     file: UploadFile = File(..., description="File binary (.pdf, .md, .txt, .py)"),
     db: AsyncSession = Depends(get_db),
-    session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
 ) -> DocumentUploadResponse:
     """Ingest a multipart file, store binary, create metadata, and queue extraction."""
     # 1. Validate target project exists
@@ -166,13 +179,17 @@ async def upload_document(
     await db.flush()
     await db.refresh(job)
 
-    # 6. Dispatch background worker
+    # 6. Commit NOW so the background task's fresh session can see the rows.
+    await db.commit()
+
+    # 7. Dispatch background worker – pass plain str values only
     background_tasks.add_task(
         process_document_background,
-        job_id=job.id,
-        file_path=saved_path,
-        file_type=document.file_type,
-        session_factory=session_factory,
+        job_id=str(job.id),
+        document_id=str(document.id),
+        project_id=str(project_id),
+        file_path=str(saved_path),
+        file_type=str(document.file_type),
     )
 
     return DocumentUploadResponse(

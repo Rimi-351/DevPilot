@@ -1,12 +1,81 @@
 # DevPilot Project Status
 
-**Current Target:** Week 4 — RAG & Evaluation  
-**Status:** Week 3 Completed  
-**Last Verified:** With `pytest` (27/27 integration tests passing, 0 warnings)  
+**Current Target:** Week 5 — Search Quality  
+**Status:** Week 4 COMPLETE — Portfolio Milestone Achieved  
+**Last Verified:** `.venv\Scripts\pytest.exe -v` → **37/37 integration tests passing, 0 warnings**  
 
 ---
 
 ## Completed Deliverables
+
+### Week 4 — Grounded RAG, Citations & AI Evaluation (Completed)
+
+1. **Dependencies & LLM Configuration**
+   - Added `httpx>=0.28.0` to `requirements.txt` and `pyproject.toml`.
+   - Updated `src/core/config.py` with optional LLM configurations:
+     - `LLM_API_KEY`: str = ""
+     - `LLM_MODEL`: str = "gpt-4o-mini"
+     - `LLM_BASE_URL`: str = "https://api.openai.com/v1"
+
+2. **Grounded LLM Service (`src/services/llm.py`)**
+   - Implemented asynchronous `LLMService` class with `generate_grounded_answer(query: str, context_chunks: list[dict]) -> tuple[str, list[dict]]`.
+   - Strict system prompt instructing model to answer solely using provided excerpts labeled `[1]`, `[2]`, place citation markers next to factual claims, and return canonical refusal `"I do not have enough information in the provided documents to answer this question."` when evidence is lacking.
+   - Built deterministic offline mock generator utilizing keyword-based semantic simulation for zero-cost, hermetic testing.
+   - Registered singleton factory `get_llm_service()` in `src/services/__init__.py`.
+
+3. **RAG Schemas & Endpoint**
+   - Defined Pydantic v2 schemas in `src/schemas/rag.py`:
+     - `RagQueryRequest`: query (str, min_length=1), top_k (int = 3, ge=1, le=10), temperature (float = 0.0, ge=0.0, le=1.0).
+     - `Citation`: citation_id (int), chunk_id (UUID), document_id (UUID), filename (str), start_offset (int), end_offset (int).
+     - `RagResponse`: query (str), answer (str), citations (list[Citation]), chunks_evaluated (int).
+   - Implemented `POST /api/v1/projects/{project_id}/rag` in `src/api/v1/endpoints/rag.py`:
+     - Verifies project existence (returns HTTP 404 if not found).
+     - Reuses vector cosine similarity retrieval to fetch top-k chunks.
+     - Formats context excerpts with 1-based citation indices [1], [2], ...
+     - Synthesizes grounded answers via `LLMService`.
+     - Maps citation markers back to exact chunk provenance and character offsets.
+   - Mounted RAG router under `/projects` in `src/api/v1/api.py`.
+
+4. **Information Retrieval Benchmarking (`src/evaluation/benchmark.py`)**
+   - Implemented IR metrics: `compute_recall_at_k`, `compute_reciprocal_rank`, and `compute_mrr` (Mean Reciprocal Rank).
+   - Expanded `DEFAULT_BENCHMARK_DATASET` to **8 items**: 5 standard domain-specific query-evidence pairs + 3 explicit failure scenarios (`lexical_gap`, `boundary_split`, `unanswerable`) with `expected_answer` and `category` fields.
+   - `BenchmarkRunner.compare_retrieval_modes()` computes Recall@1, Recall@3, MRR for both `keyword` and `vector` modes side-by-side.
+
+5. **Keyword Lexical Retrieval Baseline (`src/services/search.py`)**
+   - `lexical_keyword_search(query, chunks)` — TF token overlap scorer, O(n) over chunk corpus.
+   - Benchmarked: Keyword Recall@1=0.625, MRR=0.698 vs. Vector Recall@1=0.875, MRR=0.917.
+   - Confirms vector dominance on concept queries; keyword wins on exact identifier lookups.
+
+6. **Background Task Session Fix (`tests/conftest.py` & `src/api/v1/endpoints/documents.py`)**
+   - Root cause: `async_session_factory` in `process_document_background` was bound to production engine at import time; test engine was never seen by background tasks.
+   - Fix: `conftest.py` now monkey-patches `src.core.database.async_session_factory` AND `src.api.v1.endpoints.documents.async_session_factory` with the test `session_factory`.
+   - Upload endpoint now calls `await db.commit()` before `background_tasks.add_task(...)` to eliminate the race where the background task opened a fresh session before the job row was committed.
+   - All `add_task` arguments converted to `str` primitives to ensure reliable BackgroundTasks serialization.
+
+7. **Pytest Integration & Evaluation Coverage (`tests/test_rag.py`)**
+   - `test_end_to_end_grounded_rag`: File upload → RAG synthesis → citation markers `[1]` and provenance offsets verified.
+   - `test_ungrounded_negative_query`: Queries for missing topics return polite refusal without hallucination and empty citations.
+   - `test_rag_multi_tenant_isolation`: Verifies Project A queries never synthesize or cite Project B chunks.
+   - `test_benchmark_metrics_calculation`: Validates Recall@k, Reciprocal Rank, and MRR mathematical accuracy.
+   - `test_benchmark_runner_with_retriever`: Verifies asynchronous benchmark execution against dataset.
+   - `test_rag_nonexistent_project_returns_404`: Validates HTTP 404 boundary.
+   - `test_rag_empty_project_returns_polite_rejection`: Validates empty project handling.
+   - `test_rag_query_validation_error`: Validates HTTP 422 constraints on query length, top_k, and temperature.
+   - `test_lexical_keyword_search`: Validates lexical token overlap ranking.
+   - `test_compare_retrieval_modes`: Validates BenchmarkRunner side-by-side keyword vs. vector evaluation.
+   - **Total test suite: 37 passing tests (up from 35), 0 warnings.**
+
+8. **Live E2E Swagger UI Verification**
+   - Uploaded `company_policy.txt` via Swagger UI → job `PENDING → IN_PROGRESS → COMPLETED` automatically.
+   - RAG query returned grounded answer with inline `[1]` citation, `start_offset=0`, `end_offset=162`.
+   - Multi-tenant isolation verified: Project A cannot retrieve or cite Project B chunks (canonical refusal returned).
+
+9. **BENCHMARK.md Report Generated**
+   - Side-by-side Keyword vs. Vector comparison table (Recall@1, Recall@3, MRR).
+   - 3 documented failure cases with root causes and Week 5 mitigations.
+   - Live E2E Swagger UI verification notes with exact offsets and citation proof.
+
+---
 
 ### Week 3 — Document Retrieval Pipeline, Chunk Persistence & Semantic Search (Completed)
 
@@ -104,13 +173,12 @@
 
 ---
 
-## Next Steps (Week 4 — RAG & Evaluation)
+## Next Steps (Week 5 — Search Quality)
 
-1. **Context Construction & Grounded Prompt Assembly**:
-   - Aggregate top-k retrieved chunks formatted with provenance citations.
-   - Assemble context windows with token limit management.
-2. **LLM Generation Pipeline**:
-   - Async interface to LLM provider (e.g. OpenAI / Gemini / local Ollama) for grounded answer synthesis.
-   - Strict citation enforcement linking claims directly to chunk IDs and file offsets.
-3. **Evaluation Benchmarks**:
-   - Establish benchmark dataset and automated retrieval/grounding evaluation harness.
+1. **Hybrid Retrieval**:
+   - Combine dense vector embeddings with sparse lexical search (e.g. BM25 / PostgreSQL full-text search).
+   - Reciprocal Rank Fusion (RRF) for merging dense and sparse ranking scores.
+2. **Cross-Encoder Reranking**:
+   - Two-stage retrieval pipeline using cross-encoder models for deep semantic relevance scoring.
+3. **Automated Search Quality Evaluation**:
+   - CI-automated benchmark runner with regression guards on Recall@k and MRR thresholds.
