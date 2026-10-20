@@ -1,9 +1,9 @@
-"""Information retrieval and generation evaluation metrics for DevPilot."""
+"""Information retrieval, generation, and multilingual evaluation metrics for DevPilot."""
 
 from __future__ import annotations
 
 import re
-from typing import Any, Sequence
+from typing import Any, Dict, List, Sequence
 
 from src.services.llm import STOPWORDS
 
@@ -13,19 +13,117 @@ def compute_hit_at_k(retrieved_ids: Sequence[Any], ground_truth_ids: set[Any]) -
     return 1.0 if any(r_id in ground_truth_ids for r_id in retrieved_ids) else 0.0
 
 
-def compute_reciprocal_rank(retrieved_ids: Sequence[Any], ground_truth_ids: set[Any]) -> float:
-    """Compute Reciprocal Rank: 1 / (rank + 1) of the first matching ground-truth item, or 0.0."""
-    for rank_idx, r_id in enumerate(retrieved_ids):
-        if r_id in ground_truth_ids:
-            return 1.0 / (rank_idx + 1)
+def compute_recall_at_k(
+    retrieved_chunk_ids: Sequence[Any],
+    ground_truth_chunk_ids: Sequence[Any] | Any,
+    k: int = 5,
+) -> float:
+    """Computes Recall@k: 1.0 if at least one ground-truth chunk is in the top-k retrieved chunks, else 0.0.
+
+    Supports both list of ground truth IDs and single ground truth string identifier.
+    """
+    if k <= 0 or not ground_truth_chunk_ids or not retrieved_chunk_ids:
+        return 0.0
+
+    top_k_retrieved = set(retrieved_chunk_ids[:k])
+    if isinstance(ground_truth_chunk_ids, (str, bytes)):
+        gt_set = {ground_truth_chunk_ids}
+    else:
+        gt_set = set(ground_truth_chunk_ids)
+
+    # Intersection check
+    return 1.0 if not top_k_retrieved.isdisjoint(gt_set) else 0.0
+
+
+def compute_reciprocal_rank(
+    retrieved_ids: Sequence[Any],
+    ground_truth_ids: set[Any] | str,
+) -> float:
+    """Compute Reciprocal Rank: 1 / rank of the first matching ground-truth item, or 0.0.
+
+    Rank is 1-indexed. Supports ground_truth_ids as a set/collection or single string.
+    """
+    if not retrieved_ids or not ground_truth_ids:
+        return 0.0
+
+    if isinstance(ground_truth_ids, (str, bytes)):
+        gt_set = {ground_truth_ids}
+    else:
+        gt_set = set(ground_truth_ids)
+
+    for rank_idx, r_id in enumerate(retrieved_ids, start=1):
+        if r_id in gt_set:
+            return 1.0 / rank_idx
     return 0.0
 
 
-def compute_mrr(reciprocal_ranks: list[float]) -> float:
-    """Compute Mean Reciprocal Rank (MRR) over a list of reciprocal rank scores."""
-    if not reciprocal_ranks:
+def compute_mrr(
+    retrieved_chunk_ids: Sequence[Any] | list[float],
+    ground_truth_chunk_ids: Sequence[Any] | None = None,
+) -> float:
+    """Computes Mean Reciprocal Rank (MRR).
+
+    Supported calling conventions for full backward and cross-module compatibility:
+      1. compute_mrr(retrieved_chunk_ids, ground_truth_chunk_ids):
+         Calculates the reciprocal rank (1.0 / rank) of the first matching chunk in
+         retrieved_chunk_ids that is present in ground_truth_chunk_ids (or 0.0 if none match).
+      2. compute_mrr(reciprocal_ranks):
+         Computes the arithmetic mean over a precomputed list of reciprocal rank scores.
+    """
+    if ground_truth_chunk_ids is not None:
+        if not ground_truth_chunk_ids or not retrieved_chunk_ids:
+            return 0.0
+
+        gt_set = set(ground_truth_chunk_ids)
+        for rank, chunk_id in enumerate(retrieved_chunk_ids, start=1):
+            if chunk_id in gt_set:
+                return 1.0 / rank
+
         return 0.0
-    return sum(reciprocal_ranks) / len(reciprocal_ranks)
+
+    # 1-argument mode: precomputed sequence of reciprocal rank numbers
+    if not retrieved_chunk_ids:
+        return 0.0
+    return float(sum(retrieved_chunk_ids) / len(retrieved_chunk_ids))
+
+
+def evaluate_multilingual_run(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregates metrics globally and across language slices (English, Bangla, Banglish)."""
+    metrics_by_lang: Dict[str, List[Dict[str, float]]] = {}
+    global_recall_5: list[float] = []
+    global_mrr: list[float] = []
+
+    for item in results:
+        lang = item.get("language", "english")
+        retrieved = item.get("retrieved_chunk_ids", [])
+        gt = item.get("ground_truth_chunk_ids", [])
+
+        r5 = compute_recall_at_k(retrieved, gt, k=5)
+        mrr = compute_mrr(retrieved, gt)
+
+        global_recall_5.append(r5)
+        global_mrr.append(mrr)
+
+        if lang not in metrics_by_lang:
+            metrics_by_lang[lang] = []
+        metrics_by_lang[lang].append({"recall_at_5": r5, "mrr": mrr})
+
+    summary: dict[str, Any] = {
+        "global_recall_at_5": sum(global_recall_5) / len(global_recall_5) if global_recall_5 else 0.0,
+        "global_mrr": sum(global_mrr) / len(global_mrr) if global_mrr else 0.0,
+        "languages": {},
+    }
+
+    for lang, scores in metrics_by_lang.items():
+        r5_list = [s["recall_at_5"] for s in scores]
+        mrr_list = [s["mrr"] for s in scores]
+        summary["languages"][lang] = {
+            "count": len(scores),
+            "recall_at_5": sum(r5_list) / len(r5_list),
+            "mrr": sum(mrr_list) / len(mrr_list),
+        }
+
+    return summary
 
 
 def compute_unsupported_claims_rate(
@@ -122,3 +220,13 @@ def compute_unsupported_claims_rate(
             unsupported_count += 1
 
     return round(unsupported_count / len(claim_sentences), 4)
+
+
+__all__ = [
+    "compute_hit_at_k",
+    "compute_recall_at_k",
+    "compute_reciprocal_rank",
+    "compute_mrr",
+    "compute_unsupported_claims_rate",
+    "evaluate_multilingual_run",
+]

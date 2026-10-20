@@ -1,4 +1,4 @@
-"""Embedding service providing asynchronous text vectorization with fastembed and mock fallback."""
+"""Multilingual embedding service providing asynchronous text vectorization with FastEmbed, SentenceTransformers, and deterministic mock fallback."""
 
 import asyncio
 import hashlib
@@ -8,12 +8,17 @@ import re
 from typing import Optional
 
 
+# Multilingual Unicode token pattern for mock vectorization:
+# English, Bengali script (\u0980-\u09ff, \u200c, \u200d), and alphanumeric Banglish
+_MULTILINGUAL_TOKEN_PATTERN = re.compile(r"[\w\u0980-\u09ff\u200c\u200d]+")
+
+
 class EmbeddingService:
-    """Asynchronous embedding generation service supporting fastembed and deterministic test mock."""
+    """Asynchronous embedding generation service supporting FastEmbed, SentenceTransformers, and deterministic test mock."""
 
     def __init__(
         self,
-        model_name: str = "BAAI/bge-small-en-v1.5",
+        model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         dimensions: int = 384,
         force_mock: Optional[bool] = None,
     ) -> None:
@@ -31,12 +36,14 @@ class EmbeddingService:
             )
 
         self._model = None
+        self._backend: str = "mock" if self._use_mock else "uninitialized"
         self._init_lock = asyncio.Lock()
 
     def _get_mock_embedding(self, text: str) -> list[float]:
         """Generate a deterministic, normalized 384-dimensional embedding for test environments.
         
         Uses token hashing with L2 normalization so semantic overlap produces higher cosine similarity.
+        Supports English, pure Bangla script, and Romanized Banglish tokens.
         """
         vec = [0.0] * self.dimensions
         cleaned = text.strip().lower()
@@ -45,7 +52,7 @@ class EmbeddingService:
             return vec
 
         # Tokenize words and character 3-grams for semantic similarity matching
-        words = re.findall(r"\w+", cleaned)
+        words = _MULTILINGUAL_TOKEN_PATTERN.findall(cleaned)
         tokens = list(words)
         for w in words:
             if len(w) >= 3:
@@ -70,24 +77,47 @@ class EmbeddingService:
         return vec
 
     def _load_model_sync(self) -> None:
-        """Synchronously load fastembed model."""
-        if self._model is None and not self._use_mock:
-            try:
-                from fastembed import TextEmbedding
+        """Synchronously load embedding model using FastEmbed, SentenceTransformers, or mock fallback."""
+        if self._model is not None or self._use_mock:
+            return
 
-                self._model = TextEmbedding(model_name=self.model_name)
-            except Exception:
-                # Fallback to mock if fastembed or model weights cannot be loaded
-                self._use_mock = True
+        # 1. Attempt loading with FastEmbed (optimized CPU ONNX runtime)
+        try:
+            from fastembed import TextEmbedding
+
+            self._model = TextEmbedding(model_name=self.model_name)
+            self._backend = "fastembed"
+            return
+        except Exception:
+            pass
+
+        # 2. Attempt loading with SentenceTransformers (PyTorch multilingual encoders)
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(self.model_name)
+            self._backend = "sentence_transformers"
+            return
+        except Exception:
+            pass
+
+        # 3. Fallback to deterministic mock if offline or dependencies/weights unavailable
+        self._use_mock = True
+        self._backend = "mock"
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
-        """Synchronously generate embeddings via fastembed or mock."""
+        """Synchronously generate embeddings via FastEmbed, SentenceTransformers, or mock."""
         if self._use_mock or self._model is None:
             return [self._get_mock_embedding(t) for t in texts]
 
         try:
-            embeddings_gen = self._model.embed(texts)
-            return [emb.tolist() for emb in embeddings_gen]
+            if self._backend == "sentence_transformers":
+                embeddings = self._model.encode(texts, normalize_embeddings=True)
+                return [emb.tolist() for emb in embeddings]
+            else:
+                # FastEmbed generator
+                embeddings_gen = self._model.embed(texts)
+                return [emb.tolist() for emb in embeddings_gen]
         except Exception:
             return [self._get_mock_embedding(t) for t in texts]
 
@@ -115,8 +145,16 @@ _default_embedding_service: Optional[EmbeddingService] = None
 
 
 def get_embedding_service() -> EmbeddingService:
-    """Return singleton instance of EmbeddingService."""
+    """Return singleton instance of EmbeddingService configured from application settings."""
     global _default_embedding_service
     if _default_embedding_service is None:
-        _default_embedding_service = EmbeddingService()
+        try:
+            from src.core.config import settings
+
+            model_name = getattr(settings, "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+            dimensions = getattr(settings, "EMBEDDING_DIMENSIONS", 384)
+        except Exception:
+            model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            dimensions = 384
+        _default_embedding_service = EmbeddingService(model_name=model_name, dimensions=dimensions)
     return _default_embedding_service

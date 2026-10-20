@@ -7,11 +7,20 @@ from typing import Any, List, Optional
 from rank_bm25 import BM25Okapi
 
 
+# Multilingual Unicode token pattern supporting English, Bangla script (\u0980-\u09ff),
+# Zero-width joiner/non-joiner (\u200c, \u200d), and code-mixed Latin Banglish tokens.
+_MULTILINGUAL_TOKEN_PATTERN = re.compile(r"[\w\u0980-\u09ff\u200c\u200d]+")
+
+
 def tokenize(text: str) -> list[str]:
-    """Tokenize text into lowercase alphanumeric tokens."""
+    """Tokenize text into lowercase alphanumeric and multilingual tokens.
+
+    Correctly handles Unicode word boundaries for Bangla script, combining vowel marks,
+    alphanumeric code-mixed Banglish, and English.
+    """
     if not text:
         return []
-    return re.findall(r"\w+", text.lower())
+    return _MULTILINGUAL_TOKEN_PATTERN.findall(text.lower())
 
 
 # In-memory index cache for BM25: cache_key -> (corpus_length, bm25_instance, corpus_chunks)

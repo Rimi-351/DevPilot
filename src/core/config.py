@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "openai/gpt-oss-20b"
     LLM_BASE_URL: str = "https://api.groq.com/openai/v1"
 
+    # Multilingual Vector Embedding Configuration
+    EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    EMBEDDING_DIMENSIONS: int = 384
+
 
 @lru_cache
 def get_settings() -> Settings:
