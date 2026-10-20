@@ -84,3 +84,12 @@ class LocalStorageService:
             path.unlink()
             return True
         return False
+
+
+StorageService = LocalStorageService
+
+
+def get_storage_service() -> LocalStorageService:
+    """Provide a default storage service instance."""
+    return LocalStorageService()
+

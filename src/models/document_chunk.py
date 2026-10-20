@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, Text, Uuid, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, UUIDPrimaryKeyMixin
@@ -18,6 +18,10 @@ class DocumentChunk(Base, UUIDPrimaryKeyMixin):
     """DocumentChunk entity representing segmented document content and its embedding."""
 
     __tablename__ = "document_chunks"
+    __table_args__ = (
+        Index("ix_document_chunks_project_document", "project_id", "document_id"),
+        Index("ix_document_chunks_document_index", "document_id", "chunk_index"),
+    )
 
     document_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),

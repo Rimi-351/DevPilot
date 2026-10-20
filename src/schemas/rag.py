@@ -63,3 +63,19 @@ class RagResponse(BaseModel):
         default="vector_only",
         description="Search mode executed for retrieval",
     )
+    is_grounded: bool = Field(
+        default=True,
+        description="Whether the answer is strictly grounded against retrieved context and verified",
+    )
+    unsupported_claims_rate: float = Field(
+        default=0.0,
+        description="Fraction of claims in the answer unsupported by retrieved context (0.0 to 1.0)",
+    )
+    citation_correctness: float = Field(
+        default=1.0,
+        description="Fraction of citations that map strictly to retrieved context chunks (0.0 to 1.0)",
+    )
+    invalid_citations_stripped: list[str] = Field(
+        default_factory=list,
+        description="List of invalid, hallucinated, or unretrieved citation markers stripped by guardrails",
+    )

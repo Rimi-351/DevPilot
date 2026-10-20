@@ -5,20 +5,21 @@
 [![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0%20(async)-red?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
 [![CI Pipeline](https://img.shields.io/badge/CI-GitHub%20Actions-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tested with Pytest](https://img.shields.io/badge/Pytest-66%2F66%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tested with Pytest](https://img.shields.io/badge/Pytest-83%2F83%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 
 ---
 
-## Milestone Status — Weeks 1–8 Complete
+## Milestone Status — Weeks 1–9 Complete
 
-DevPilot is a production-grade, multi-tenant AI document intelligence platform built with modern async Python standards. At the **Week 8 milestone**, the platform features our production-winning **Approach A+B Hybrid (RRF-Blended Multilingual Cross-Encoder)** alongside bounded agentic workflows, multilingual evaluation sweeps, hybrid retrieval, and grounded answer synthesis:
+DevPilot is an enterprise-grade, multi-tenant AI document intelligence platform built with modern async Python standards. At the **Week 9 milestone**, the backend is fully hardened with 100% object-level authorization coverage, resilient ingestion state reporting with transactional rollback, composite multi-tenant database indexes, bounded deterministic pagination, and automated anti-hallucination citation verification guardrails:
 
 | Capability | Status | Notes |
 |:---|:---:|:---|
 | **Async FastAPI & SQLAlchemy 2.0** | ✅ | Asynchronous connection pooling and declarative ORM |
-| **Authentication & Tenant Isolation** | ✅ | `X-API-Key` header authentication; 401 unauthenticated & 403 cross-tenant isolation |
-| **Document Ingestion Pipeline** | ✅ | SHA-256 deduplication, PyPDF/markdown extractors, sliding-window chunking (512/64) |
-| **Background Processing Queue** | ✅ | FastAPI `BackgroundTasks` with independent `async_session_factory` sessions |
+| **Authentication & Object-Level Tenant Auth** | ✅ | `X-API-Key` header authentication; 401 unauthenticated & 403 cross-tenant isolation across 100% of routes including `/api/v1/jobs` |
+| **Document Ingestion Pipeline & Error Reporting** | ✅ | SHA-256 deduplication, sliding-window chunking, and resilient background state reporting (`PENDING` -> `PROCESSING` -> `COMPLETED`/`FAILED`) with session rollback |
+| **Composite Database Indexes & Deterministic Slicing** | ✅ | Multi-tenant composite indexes on `projects`, `documents`, `chunks`, and `jobs`; bounded pagination (`skip >= 0`, `1 <= limit <= 100`) with deterministic tie-breaking |
+| **Citation Verification & Anti-Hallucination Guardrails** | ✅ | Automated post-processing stripping invalid/invented source tags, flagging ungrounded answers, and reporting citation correctness & unsupported claims |
 | **Dense Semantic Search** | ✅ | 384-dimensional FastEmbed (`BAAI/bge-small-en-v1.5`) & Multilingual (`paraphrase-multilingual-MiniLM-L12-v2`) |
 | **Sparse BM25 & Multilingual Tokenizer** | ✅ | `rank-bm25` BM25Okapi with Unicode regex (`[\w\u0980-\u09ff\u200c\u200d]+`) and LRU caching |
 | **Reciprocal Rank Fusion (RRF)** | ✅ | Formula-based candidate blending with constant $k=60$ |
@@ -40,7 +41,7 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
   Client Request       │              DevPilot FastAPI Application              │
   (X-API-Key Header)   │                                                        │
   ──────────────────►  │   Security Guard       FastAPI Router       Uvicorn    │
-                       │   (401/403 Tenant)   (Async Endpoints)   (ASGI Server) │
+                       │   (401/403 Tenant)   (Bounded Pagination)(ASGI Server) │
                        └───────────────────────────┬────────────────────────────┘
                                                    │
                     ┌──────────────────────────────┴──────────────────────────────┐
@@ -51,7 +52,9 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                     │                           Reciprocal Rank Fusion (RRF k=60) │
                     │  chunk_text(512, 64)      Cross-Encoder Reranker (mmarco)   │
                     │  (Sliding Window)         Neural-Symbolic Consensus (20%)   │
-                    │                           LLMService (Grounded + Citations) │
+                    │                           RagService & Citation Guardrails  │
+                    │  process_document_        (CitationVerificationService)     │
+                    │  ingestion (Rollback FSM) LLMService (Grounded + Citations) │
                     │                                                             │
                     │  GuardedToolDispatcher    BoundedAgent (4-Phase FSM)        │
                     │  (Pydantic Validation,    (SEARCH -> INSPECT ->             │
@@ -61,20 +64,23 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                     ┌──────────────────────────────┴──────────────────────────────┐
                     │          SQLAlchemy 2.0 Async ORM & Data Layer              │
                     │                                                             │
-                    │   Project (tenant_id)     DocumentChunk (384-dim vector)    │
-                    │   Document (file metadata) ProcessingJob (PENDING/COMPLETED)│
-                    │                                                             │
+                    │   Project (ix_tenant_created) DocumentChunk (ix_doc_idx)    │
+                    │   Document (ix_project_creat) ProcessingJob (State Machine: │
+                    │                               PENDING/PROCESSING/COMPLETED/ │
+                    │                               FAILED with Rollback)         │
                     │         PostgreSQL 16 (Prod/Docker) / SQLite (Test)         │
                     └─────────────────────────────────────────────────────────────┘
 ```
 
 ### Retrieval, Ingestion & Agent Workflows
 
-1. **Ingestion Flow:**
+1. **Ingestion Flow (Resilient State Machine with Session Rollback):**
    ```
    POST /documents/upload ──► Validate X-API-Key & Tenant ──► Save File (SHA-256) ──► Enqueue Job
                                                                                           │
                                                         FastAPI BackgroundTask ◄──────────┘
+                                                                │
+                                            State: PROCESSING (started_at stamped)
                                                                 │
                                             Extract Text (PDF/MD/TXT/PY)
                                                                 │
@@ -82,10 +88,13 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                                                                 │
                                             Generate 384-d FastEmbed Vectors
                                                                 │
-                                            Persist DocumentChunk rows ──► Job COMPLETED
+                                            Persist Chunks ──► Success: Job COMPLETED
+                                                                │
+                                                                └── Exception: Rollback Session
+                                                                               ──► Job FAILED
    ```
 
-2. **Hybrid RAG Flow:**
+2. **Hybrid RAG Flow (With Citation Integrity Guardrails):**
    ```
    POST /projects/{id}/rag ──► Validate Tenant Access
                                      │
@@ -102,7 +111,12 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                                      ▼
                       Neural-Symbolic Consensus (80% CE + 20% Normalized RRF)
                                      ▼
-                      Grounded LLM Answer Synthesis + Citations [1]
+                      Grounded LLM Answer Synthesis
+                                     ▼
+                      CitationVerificationService & Post-Processing Guardrail
+                 (Strips invalid tags [99], verifies chunk IDs, flags ungrounded)
+                                     ▼
+                      RagResponse (answer, citations, citation_correctness, is_grounded)
    ```
 
 3. **Bounded Agent Workflow:**
@@ -215,7 +229,7 @@ uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
 
 ### 6. Run Test Suite & Benchmark Runner
 ```bash
-# Run all 66 automated tests
+# Run all 68 automated tests
 pytest -v
 
 # Run the 100-query multilingual benchmark sweep
@@ -296,6 +310,8 @@ e:\Devpilot\
 │   │   └── processing_job.py         # ProcessingJob & JobStatus enum
 │   ├── schemas/                      # Pydantic v2 validation schemas
 │   ├── services/
+│   │   ├── ingestion/                # Resilient document ingestion pipeline & state machine
+│   │   ├── job.py                    # ProcessingJob service & tenant access verification
 │   │   ├── storage.py                # LocalStorageService (SHA-256, 10MB limit)
 │   │   ├── extractor.py              # PDF/MD/TXT/PY file text extraction
 │   │   ├── chunker.py                # Sliding-window chunker (512/64)
@@ -313,8 +329,8 @@ e:\Devpilot\
 │   │   ├── runner.py                 # Multilingual benchmark runner & parameter sweep CLI
 │   │   ├── metrics.py                # Hit@k, MRR, latency, unsupported claims rate
 │   │   └── benchmark.py              # Legacy evaluation runner helpers
-│   └── api/v1/endpoints/             # REST endpoints (auth, projects, docs, search, rag, agent)
-└── tests/                            # 66 integration tests (100% green)
+│   └── api/v1/endpoints/             # REST endpoints (auth, projects, docs, jobs, search, rag, agent)
+└── tests/                            # 73 integration tests (100% green)
 ```
 
 ---

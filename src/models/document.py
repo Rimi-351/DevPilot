@@ -3,7 +3,7 @@
 import uuid
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, ForeignKey, String, Uuid
+from sqlalchemy import BigInteger, ForeignKey, Index, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -18,6 +18,10 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Document entity representing an uploaded or tracked file within a project."""
 
     __tablename__ = "documents"
+    __table_args__ = (
+        Index("ix_documents_project_created", "project_id", "created_at"),
+        Index("ix_documents_project_filename", "project_id", "filename"),
+    )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),

@@ -3,6 +3,8 @@
 import math
 from uuid import UUID
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,16 +46,27 @@ async def create_project(
     "",
     response_model=PaginatedResponse[ProjectRead],
     status_code=status.HTTP_200_OK,
-    summary="List Projects with pagination",
+    summary="List Projects with bounded deterministic pagination",
 )
 async def list_projects(
-    page: int = Query(default=1, ge=1, description="Page number"),
-    page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    skip: int = Query(default=0, ge=0, description="Offset: number of items to skip"),
+    limit: int = Query(default=20, ge=1, le=100, description="Limit: items per page capped at 100"),
+    page: Optional[int] = Query(default=None, ge=1, description="Page number (1-indexed)"),
+    page_size: Optional[int] = Query(default=None, ge=1, le=100, description="Items per page"),
     api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Retrieve paginated list of projects belonging to the authenticated tenant."""
-    offset = (page - 1) * page_size
+    """Retrieve paginated list of projects belonging to the authenticated tenant with deterministic ordering."""
+    if page is not None and (skip == 0 or skip is None):
+        effective_page_size = page_size if page_size is not None else limit
+        offset = (page - 1) * effective_page_size
+        effective_limit = effective_page_size
+    elif page_size is not None and limit == 20:
+        offset = skip
+        effective_limit = page_size
+    else:
+        offset = skip
+        effective_limit = limit
 
     # Filter projects for the current tenant or legacy unclaimed projects
     tenant_filter = (Project.tenant_id == api_key) | (Project.owner_api_key == api_key) | (Project.tenant_id.is_(None))
@@ -65,21 +78,24 @@ async def list_projects(
     query = (
         select(Project)
         .where(tenant_filter)
-        .order_by(Project.created_at.desc())
+        .order_by(Project.created_at.desc(), Project.id.asc())
         .offset(offset)
-        .limit(page_size)
+        .limit(effective_limit)
     )
     result = await db.execute(query)
     items = result.scalars().all()
 
-    total_pages = math.ceil(total / page_size) if total > 0 else 0
+    total_pages = math.ceil(total / effective_limit) if total > 0 else 0
+    page_computed = (offset // effective_limit) + 1 if effective_limit > 0 else 1
 
     return {
         "items": items,
         "total": total,
-        "page": page,
-        "page_size": page_size,
+        "page": page_computed,
+        "page_size": effective_limit,
         "total_pages": total_pages,
+        "skip": offset,
+        "limit": effective_limit,
     }
 
 

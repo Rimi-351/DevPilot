@@ -14,6 +14,10 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import FileTooLargeError, UnsupportedFileExtensionError
+from src.models.document import Document
+from src.models.document_chunk import DocumentChunk
+from src.models.processing_job import ProcessingJob
+from src.models.project import Project
 from src.services.agent.schemas import ToolExecutionStatus, WorkflowPhase
 from src.services.agent.workflow import GuardedToolDispatcher
 from src.services.llm import LLMService
@@ -58,6 +62,34 @@ async def test_boundary_invalid_and_malformed_ingress_payloads(client: AsyncClie
         headers=headers,
     )
     assert res_empty_rag.status_code == 422
+
+    # 6. Pagination bounds: negative skip (ge=0 violation) and limit > 100 (le=100 violation)
+    res_neg_skip = await client.get("/api/v1/projects?skip=-1", headers=headers)
+    assert res_neg_skip.status_code == 422
+
+    res_huge_limit = await client.get("/api/v1/projects?limit=1000000", headers=headers)
+    assert res_huge_limit.status_code == 422
+
+    res_zero_limit = await client.get("/api/v1/projects?limit=0", headers=headers)
+    assert res_zero_limit.status_code == 422
+
+    res_doc_neg_skip = await client.get("/api/v1/documents?skip=-5", headers=headers)
+    assert res_doc_neg_skip.status_code == 422
+
+    res_doc_zero_limit = await client.get("/api/v1/documents?limit=0", headers=headers)
+    assert res_doc_zero_limit.status_code == 422
+
+    res_doc_huge_limit = await client.get("/api/v1/documents?limit=500", headers=headers)
+    assert res_doc_huge_limit.status_code == 422
+
+    res_job_neg_skip = await client.get("/api/v1/jobs?skip=-1", headers=headers)
+    assert res_job_neg_skip.status_code == 422
+
+    res_job_zero_limit = await client.get("/api/v1/jobs?limit=0", headers=headers)
+    assert res_job_zero_limit.status_code == 422
+
+    res_job_huge_limit = await client.get("/api/v1/jobs?limit=1000", headers=headers)
+    assert res_job_huge_limit.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -188,6 +220,38 @@ async def test_boundary_object_level_authorization_coverage(client: AsyncClient)
     )
     assert res_forbidden_upload.status_code == 403
 
+    # 7. Tenant 1 enqueues a background job
+    res_job = await client.post(
+        "/api/v1/jobs",
+        json={"project_id": project_id, "job_type": "document_indexing"},
+        headers=tenant_1_headers,
+    )
+    assert res_job.status_code == 201
+    job_id = res_job.json()["id"]
+
+    # 8. Tenant 2 cannot inspect or mutate Tenant 1's job (403 Forbidden)
+    res_forbidden_job_get = await client.get(f"/api/v1/jobs/{job_id}", headers=tenant_2_headers)
+    assert res_forbidden_job_get.status_code == 403
+
+    res_forbidden_job_patch = await client.patch(
+        f"/api/v1/jobs/{job_id}/status",
+        json={"status": "FAILED"},
+        headers=tenant_2_headers,
+    )
+    assert res_forbidden_job_patch.status_code == 403
+
+    # 9. Tenant 2 cannot filter list jobs by Tenant 1's project (403 Forbidden)
+    res_forbidden_job_list = await client.get(
+        f"/api/v1/jobs?project_id={project_id}",
+        headers=tenant_2_headers,
+    )
+    assert res_forbidden_job_list.status_code == 403
+
+    # 10. Tenant 2 unfiltered job list never leaks Tenant 1's job
+    res_t2_jobs = await client.get("/api/v1/jobs", headers=tenant_2_headers)
+    assert res_t2_jobs.status_code == 200
+    assert job_id not in [j["id"] for j in res_t2_jobs.json()["items"]]
+
 
 @pytest.mark.asyncio
 async def test_boundary_agent_dispatcher_fault_injection(db_session: AsyncSession) -> None:
@@ -236,3 +300,212 @@ async def test_boundary_agent_dispatcher_fault_injection(db_session: AsyncSessio
         )
         assert log.status == ToolExecutionStatus.TIMEOUT
         assert payload["status"] == "timeout"
+
+
+def test_boundary_composite_database_indexes() -> None:
+    """Verify that multi-tenant composite indexes are declared on models and registered in SQLAlchemy metadata."""
+    from src.models.base import Base
+
+    # 1. Project: (tenant_id, created_at)
+    proj_indexes = {
+        tuple(c.name for c in idx.columns): idx.name for idx in Project.__table__.indexes
+    }
+    assert ("tenant_id", "created_at") in proj_indexes
+    assert any(idx.name == "ix_projects_tenant_created" for idx in Base.metadata.tables["projects"].indexes)
+
+    # 2. Document: (project_id, created_at)
+    doc_indexes = {
+        tuple(c.name for c in idx.columns): idx.name for idx in Document.__table__.indexes
+    }
+    assert ("project_id", "created_at") in doc_indexes
+    assert any(idx.name == "ix_documents_project_created" for idx in Base.metadata.tables["documents"].indexes)
+
+    # 3. DocumentChunk: (document_id, chunk_index) and (project_id, document_id)
+    chunk_indexes = {
+        tuple(c.name for c in idx.columns): idx.name for idx in DocumentChunk.__table__.indexes
+    }
+    assert ("document_id", "chunk_index") in chunk_indexes
+    assert ("project_id", "document_id") in chunk_indexes
+    assert any(idx.name == "ix_document_chunks_document_index" for idx in Base.metadata.tables["document_chunks"].indexes)
+    assert any(idx.name == "ix_document_chunks_project_document" for idx in Base.metadata.tables["document_chunks"].indexes)
+
+    # 4. ProcessingJob: (project_id, status, created_at)
+    job_indexes = {
+        tuple(c.name for c in idx.columns): idx.name for idx in ProcessingJob.__table__.indexes
+    }
+    assert ("project_id", "status", "created_at") in job_indexes
+    assert any(idx.name == "ix_processing_jobs_project_status_created" for idx in Base.metadata.tables["processing_jobs"].indexes)
+
+
+@pytest.mark.asyncio
+async def test_boundary_deterministic_pagination_ordering(client: AsyncClient) -> None:
+    """Verify deterministic pagination ordering (created_at DESC, id ASC) across projects, documents, and jobs."""
+    headers = {"X-API-Key": "deterministic-pagination-tester"}
+
+    # 1. Create a project
+    proj_res = await client.post(
+        "/api/v1/projects",
+        json={"name": "Deterministic Pagination Project"},
+        headers=headers,
+    )
+    assert proj_res.status_code == 201
+    proj_id = proj_res.json()["id"]
+
+    # 2. Ingest 4 documents rapidly
+    doc_ids = []
+    for idx in range(4):
+        files = {"file": (f"det_doc_{idx}.txt", f"Deterministic chunk text content {idx}".encode(), "text/plain")}
+        upload_res = await client.post(
+            "/api/v1/documents/upload",
+            data={"project_id": proj_id},
+            files=files,
+            headers=headers,
+        )
+        assert upload_res.status_code == 201
+        doc_ids.append(upload_res.json()["id"])
+
+    # 3. Query documents and verify ordering (created_at DESC, id ASC)
+    doc_list_res = await client.get(
+        f"/api/v1/documents?project_id={proj_id}&skip=0&limit=10",
+        headers=headers,
+    )
+    assert doc_list_res.status_code == 200
+    docs = doc_list_res.json()["items"]
+    assert len(docs) == 4
+    for i in range(len(docs) - 1):
+        t1, id1 = docs[i]["created_at"], docs[i]["id"]
+        t2, id2 = docs[i + 1]["created_at"], docs[i + 1]["id"]
+        if t1 == t2:
+            assert id1 <= id2  # id ASC tie-breaking
+        else:
+            assert t1 >= t2  # created_at DESC
+
+    # 4. Query jobs and verify ordering (created_at DESC, id ASC)
+    jobs_list_res = await client.get(
+        f"/api/v1/jobs?project_id={proj_id}&skip=0&limit=10",
+        headers=headers,
+    )
+    assert jobs_list_res.status_code == 200
+    jobs = jobs_list_res.json()["items"]
+    assert len(jobs) >= 4
+    for i in range(len(jobs) - 1):
+        t1, id1 = jobs[i]["created_at"], jobs[i]["id"]
+        t2, id2 = jobs[i + 1]["created_at"], jobs[i + 1]["id"]
+        if t1 == t2:
+            assert id1 <= id2  # id ASC tie-breaking
+        else:
+            assert t1 >= t2  # created_at DESC
+
+
+@pytest.mark.asyncio
+async def test_boundary_citation_verification_and_anti_hallucination_guardrails(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that fabricated chunk references, out-of-bounds indices, and unretrieved IDs
+
+    are stripped by the anti-hallucination guardrail, flagged as ungrounded, and correctly scored.
+    """
+    from unittest.mock import AsyncMock
+    from src.services.rag import get_rag_service
+
+    headers = {"X-API-Key": "citation-boundary-tester"}
+
+    # 1. Create project & upload authentic document
+    proj_res = await client.post(
+        "/api/v1/projects",
+        json={"name": "Boundary Guardrails Project"},
+        headers=headers,
+    )
+    assert proj_res.status_code == 201
+    project_id = proj_res.json()["id"]
+
+    content = "Kubernetes pods run containerized workloads with declarative deployments."
+    files = {"file": ("k8s.txt", content.encode(), "text/plain")}
+    await client.post(
+        "/api/v1/documents/upload",
+        data={"project_id": project_id},
+        files=files,
+        headers=headers,
+    )
+
+    # 2. Inject LLM response with multiple hallucinated citation markers
+    rag_service = get_rag_service()
+    fake_uuid_1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    fake_uuid_2 = "99999999-8888-7777-6666-555555555555"
+    hallucinated_answer = (
+        f"Kubernetes pods run containerized workloads [1]. "
+        f"Quantum entanglement synchronizes pods instantaneously [chunk: {fake_uuid_1}]. "
+        f"Sub-atomic storage layer [doc: {fake_uuid_2}][99]."
+    )
+
+    mock_generate = AsyncMock(return_value=(hallucinated_answer, []))
+    monkeypatch.setattr(rag_service.llm_service, "generate_grounded_answer", mock_generate)
+
+    # 3. Query RAG endpoint
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "Kubernetes pod workload", "top_k": 3},
+        headers=headers,
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    # 4. Verify post-processing guardrail assertions
+    assert fake_uuid_1 not in rag_data["answer"]
+    assert fake_uuid_2 not in rag_data["answer"]
+    assert "[99]" not in rag_data["answer"]
+    assert "[1]" in rag_data["answer"]
+    assert rag_data["is_grounded"] is False
+    assert len(rag_data["invalid_citations_stripped"]) >= 3
+    assert rag_data["citation_correctness"] < 0.50
+    assert rag_data["unsupported_claims_rate"] > 0.0
+    assert len(rag_data["citations"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_boundary_negative_query_coca_cola_anti_hallucination_guarantee(client: AsyncClient) -> None:
+    """Verify that ungrounded queries like 'What is the secret recipe of Coca-Cola?'
+
+    strictly return polite rejections with 0 citations and no hallucinated facts under boundary conditions.
+    """
+    headers = {"X-API-Key": "negative-boundary-tester"}
+
+    # 1. Create project with unrelated technical documents
+    proj_res = await client.post(
+        "/api/v1/projects",
+        json={"name": "Boundary Negative Query Project"},
+        headers=headers,
+    )
+    assert proj_res.status_code == 201
+    project_id = proj_res.json()["id"]
+
+    content = "Distributed consensus algorithm Raft provides fault-tolerant state machine replication."
+    files = {"file": ("raft.txt", content.encode(), "text/plain")}
+    await client.post(
+        "/api/v1/documents/upload",
+        data={"project_id": project_id},
+        files=files,
+        headers=headers,
+    )
+
+    # 2. Query for Coca-Cola secret recipe
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "What is the secret recipe of Coca-Cola?", "top_k": 3},
+        headers=headers,
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    # 3. Assert strict polite rejection without factual hallucination
+    assert "I do not have enough information in the provided documents to answer this question." in rag_data["answer"]
+    assert "coca-cola" not in rag_data["answer"].lower()
+    assert "sugar" not in rag_data["answer"].lower()
+    assert "syrup" not in rag_data["answer"].lower()
+    assert rag_data["citations"] == []
+    assert rag_data["is_grounded"] is True
+    assert rag_data["unsupported_claims_rate"] == 0.0
+    assert rag_data["citation_correctness"] == 1.0
+
+

@@ -1,10 +1,11 @@
 """ProcessingJob domain model for asynchronous workflows."""
 
+from datetime import datetime
 import enum
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
-from sqlalchemy import JSON, Enum, ForeignKey, String, Text, Uuid
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -19,6 +20,7 @@ class JobStatus(str, enum.Enum):
 
     PENDING = "PENDING"
     IN_PROGRESS = "IN_PROGRESS"
+    PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -28,6 +30,10 @@ class ProcessingJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """ProcessingJob entity tracking asynchronous analysis, indexing, or generation."""
 
     __tablename__ = "processing_jobs"
+    __table_args__ = (
+        Index("ix_processing_jobs_project_status_created", "project_id", "status", "created_at"),
+        Index("ix_processing_jobs_project_created", "project_id", "created_at"),
+    )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -51,6 +57,8 @@ class ProcessingJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     payload: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     result: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="processing_jobs")

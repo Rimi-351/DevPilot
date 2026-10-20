@@ -37,6 +37,8 @@ from src.services.embedding import get_embedding_service
 from src.services.extractor import extract_text_from_file
 from src.services.storage import LocalStorageService
 
+from src.services.ingestion.pipeline import process_document_ingestion
+
 router = APIRouter()
 
 
@@ -49,76 +51,20 @@ async def process_document_background(
 ) -> None:
     """Background task: extract text, chunk, embed, and persist DocumentChunk rows.
     Accepts only plain str args (safe for BackgroundTasks serialisation).
-    Opens its own DB session — never reuses the closed request session.
+    Delegates to resilient process_document_ingestion pipeline with transactional isolation.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(">>> BACKGROUND TASK TRIGGERED FOR JOB: %s", job_id)
-
-    job_uuid = UUID(job_id)
-
-    # ── 1. Mark IN_PROGRESS ──────────────────────────────────────────────────
-    async with async_session_factory() as session:
-        job = await session.get(ProcessingJob, job_uuid)
-        if not job:
-            logger.error("ProcessingJob %s not found in DB", job_id)
-            return
-        job.status = JobStatus.IN_PROGRESS
-        await session.commit()
-
-    # ── 2. Process (try/except keeps failures visible) ────────────────────────
-    async with async_session_factory() as session:
-        job = await session.get(ProcessingJob, job_uuid)
-        if not job:
-            logger.error("ProcessingJob %s vanished before processing", job_id)
-            return
-        try:
-            # Extract text
-            text = await extract_text_from_file(file_path, file_type=file_type)
-
-            # Chunk using centralized settings
-            chunks = chunk_text(text, chunk_size=settings.CHUNK_SIZE, chunk_overlap=settings.CHUNK_OVERLAP)
-            chunk_dicts = [c.to_dict() for c in chunks]
-
-            # Embed
-            embedding_service = get_embedding_service()
-            chunk_texts = [c.content for c in chunks]
-            embeddings = await embedding_service.generate_embeddings(chunk_texts)
-
-            # Persist chunks
-            if chunks:
-                db_chunks = [
-                    DocumentChunk(
-                        document_id=UUID(document_id),
-                        project_id=UUID(project_id),
-                        chunk_index=chunk.index,
-                        content=chunk.content,
-                        start_offset=chunk.start_offset,
-                        end_offset=chunk.end_offset,
-                        embedding=embeddings[i] if i < len(embeddings) else None,
-                    )
-                    for i, chunk in enumerate(chunks)
-                ]
-                session.add_all(db_chunks)
-
-            dimensions = len(embeddings[0]) if embeddings else 0
-            job.status = JobStatus.COMPLETED
-            job.result = {
-                "chunks_count": len(chunks),
-                "chunk_count": len(chunks),   # alias for backward compatibility
-                "embedded": True,
-                "dimensions": dimensions,
-                "total_characters": len(text),
-                "chunks_preview": chunk_dicts[:5],
-            }
-            await session.commit()
-            logger.info("Job %s COMPLETED — %d chunks persisted", job_id, len(chunks))
-
-        except Exception as exc:
-            logger.exception("Background processing failed for job %s", job_id)
-            job.status = JobStatus.FAILED
-            job.error_message = f"{type(exc).__name__}: {exc}"
-            await session.commit()
+    try:
+        await process_document_ingestion(
+            job_id=job_id,
+            document_id=document_id,
+            project_id=project_id,
+            file_path=file_path,
+            file_type=file_type,
+            session_factory=async_session_factory,
+        )
+    except Exception:
+        # State machine transition to FAILED and session rollback handled inside pipeline
+        pass
 
 
 @router.post(
@@ -247,17 +193,28 @@ async def create_document(
     "",
     response_model=PaginatedResponse[DocumentRead],
     status_code=status.HTTP_200_OK,
-    summary="List Documents with pagination and filters",
+    summary="List Documents with bounded deterministic pagination",
 )
 async def list_documents(
     project_id: Optional[UUID] = Query(default=None, description="Filter by project ID"),
-    page: int = Query(default=1, ge=1, description="Page number"),
-    page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    skip: int = Query(default=0, ge=0, description="Offset: number of items to skip"),
+    limit: int = Query(default=20, ge=1, le=100, description="Limit: items per page capped at 100"),
+    page: Optional[int] = Query(default=None, ge=1, description="Page number (1-indexed)"),
+    page_size: Optional[int] = Query(default=None, ge=1, le=100, description="Items per page"),
     api_key: str = Depends(get_current_api_key),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Retrieve paginated list of documents with tenant isolation."""
-    offset = (page - 1) * page_size
+    """Retrieve paginated list of documents with tenant isolation and deterministic ordering."""
+    if page is not None and (skip == 0 or skip is None):
+        effective_page_size = page_size if page_size is not None else limit
+        offset = (page - 1) * effective_page_size
+        effective_limit = effective_page_size
+    elif page_size is not None and limit == 20:
+        offset = skip
+        effective_limit = page_size
+    else:
+        offset = skip
+        effective_limit = limit
 
     if project_id:
         project = await db.get(Project, project_id)
@@ -269,7 +226,11 @@ async def list_documents(
         verify_project_tenant_access(project, api_key)
 
         total_query = select(func.count()).select_from(Document).where(Document.project_id == project_id)
-        data_query = select(Document).where(Document.project_id == project_id).order_by(Document.created_at.desc())
+        data_query = (
+            select(Document)
+            .where(Document.project_id == project_id)
+            .order_by(Document.created_at.desc(), Document.id.asc())
+        )
     else:
         tenant_filter = (
             (Project.tenant_id == api_key)
@@ -286,24 +247,27 @@ async def list_documents(
             select(Document)
             .join(Project, Document.project_id == Project.id)
             .where(tenant_filter)
-            .order_by(Document.created_at.desc())
+            .order_by(Document.created_at.desc(), Document.id.asc())
         )
 
     total_result = await db.execute(total_query)
     total = total_result.scalar_one()
 
-    data_query = data_query.offset(offset).limit(page_size)
+    data_query = data_query.offset(offset).limit(effective_limit)
     result = await db.execute(data_query)
     items = result.scalars().all()
 
-    total_pages = math.ceil(total / page_size) if total > 0 else 0
+    total_pages = math.ceil(total / effective_limit) if total > 0 else 0
+    page_computed = (offset // effective_limit) + 1 if effective_limit > 0 else 1
 
     return {
         "items": items,
         "total": total,
-        "page": page,
-        "page_size": page_size,
+        "page": page_computed,
+        "page_size": effective_limit,
         "total_pages": total_pages,
+        "skip": offset,
+        "limit": effective_limit,
     }
 
 

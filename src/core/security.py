@@ -37,6 +37,16 @@ async def get_current_api_key(
     return api_key.strip()
 
 
+async def get_current_tenant(
+    api_key: Optional[str] = Security(api_key_header),
+) -> str:
+    """Validate and extract the caller's tenant identifier from the X-API-Key header.
+
+    Alias for get_current_api_key ensuring semantic clarity for tenant-scoped operations.
+    """
+    return await get_current_api_key(api_key)
+
+
 def verify_project_tenant_access(project: Project, current_api_key: str) -> None:
     """Enforce tenant isolation on a project entity.
 

@@ -89,6 +89,7 @@ async def client(test_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
     with (
         patch("src.core.database.async_session_factory", session_factory),
         patch("src.api.v1.endpoints.documents.async_session_factory", session_factory),
+        patch("src.services.ingestion.pipeline.async_session_factory", session_factory),
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(

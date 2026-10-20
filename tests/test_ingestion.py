@@ -3,6 +3,8 @@
 import io
 import uuid
 import pytest
+from unittest.mock import patch
+
 from httpx import AsyncClient
 from pypdf import PdfWriter
 
@@ -197,3 +199,124 @@ async def test_upload_nonexistent_project_rejected(client: AsyncClient) -> None:
 
     upload_res = await client.post("/api/v1/documents/upload", data=data, files=files)
     assert upload_res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ingestion_job_failure_state_reporting_and_session_rollback(client: AsyncClient) -> None:
+    """Verify that exceptions during extraction/chunking/embedding transition job to FAILED,
+    populate error_message with actionable diagnostic detail, and record completed_at."""
+    # 1. Create project
+    proj_res = await client.post("/api/v1/projects", json={"name": "Ingestion Crash Project"})
+    project_id = proj_res.json()["id"]
+
+    # 2. Upload with mocked extraction crash
+    simulated_error = "Corrupted document stream: premature EOF encountered"
+    with patch("src.services.ingestion.pipeline.extract_text_from_file", side_effect=RuntimeError(simulated_error)):
+        files = {
+            "file": ("corrupt.txt", b"corrupted bytes", "text/plain"),
+        }
+        data = {
+            "project_id": project_id,
+        }
+        upload_res = await client.post("/api/v1/documents/upload", data=data, files=files)
+        assert upload_res.status_code == 201
+        doc_data = upload_res.json()
+        job_id = doc_data["job_id"]
+
+    # 3. Retrieve background ProcessingJob status
+    job_res = await client.get(f"/api/v1/jobs/{job_id}")
+    assert job_res.status_code == 200
+    job_data = job_res.json()
+
+    assert job_data["status"] == "FAILED"
+    assert job_data["error_message"] is not None
+    assert "RuntimeError" in job_data["error_message"]
+    assert simulated_error in job_data["error_message"]
+    assert job_data["started_at"] is not None
+    assert job_data["completed_at"] is not None
+
+    # 4. Verify no partial chunks persisted
+    chunks_res = await client.get(f"/api/v1/documents?project_id={project_id}")
+    assert chunks_res.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ingestion_job_lifecycle_timestamps_and_processing_state(client: AsyncClient) -> None:
+    """Verify that successful ingestion transitions through lifecycle states and sets timestamps."""
+    proj_res = await client.post("/api/v1/projects", json={"name": "Lifecycle Timestamps Project"})
+    project_id = proj_res.json()["id"]
+
+    files = {
+        "file": ("notes.md", b"# Release Notes\n\n- Comprehensive state machine audit completed.", "text/markdown"),
+    }
+    data = {
+        "project_id": project_id,
+    }
+    upload_res = await client.post("/api/v1/documents/upload", data=data, files=files)
+    assert upload_res.status_code == 201
+    job_id = upload_res.json()["job_id"]
+
+    job_res = await client.get(f"/api/v1/jobs/{job_id}")
+    assert job_res.status_code == 200
+    job_data = job_res.json()
+
+    assert job_data["status"] == "COMPLETED"
+    assert job_data["started_at"] is not None
+    assert job_data["completed_at"] is not None
+    assert job_data["error_message"] is None
+    assert job_data["result"]["chunks_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_ingestion_bounded_pagination_skip_and_limit(client: AsyncClient) -> None:
+    """Verify bounded deterministic pagination with skip and limit on document and project endpoints."""
+    # Create a project
+    proj_res = await client.post("/api/v1/projects", json={"name": "Pagination Testing Project"})
+    project_id = proj_res.json()["id"]
+
+    # Upload multiple documents
+    for i in range(5):
+        files = {"file": (f"doc_{i}.txt", f"Document content number {i}".encode(), "text/plain")}
+        await client.post("/api/v1/documents/upload", data={"project_id": project_id}, files=files)
+
+    # Verify boundary rejections (skip < 0, limit < 1, limit > 100 -> 422)
+    bad_skip = await client.get(f"/api/v1/documents?project_id={project_id}&skip=-1")
+    assert bad_skip.status_code == 422
+
+    bad_zero_limit = await client.get(f"/api/v1/documents?project_id={project_id}&limit=0")
+    assert bad_zero_limit.status_code == 422
+
+    bad_large_limit = await client.get(f"/api/v1/documents?project_id={project_id}&limit=101")
+    assert bad_large_limit.status_code == 422
+
+    # Test skip=0, limit=2
+    res_page1 = await client.get(f"/api/v1/documents?project_id={project_id}&skip=0&limit=2")
+    assert res_page1.status_code == 200
+    data_page1 = res_page1.json()
+    assert len(data_page1["items"]) == 2
+    assert data_page1["skip"] == 0
+    assert data_page1["limit"] == 2
+    assert data_page1["total"] == 5
+
+    # Test skip=2, limit=2
+    res_page2 = await client.get(f"/api/v1/documents?project_id={project_id}&skip=2&limit=2")
+    assert res_page2.status_code == 200
+    data_page2 = res_page2.json()
+    assert len(data_page2["items"]) == 2
+    assert data_page2["skip"] == 2
+
+    # Verify no overlapping IDs between page 1 and page 2
+    page1_ids = {doc["id"] for doc in data_page1["items"]}
+    page2_ids = {doc["id"] for doc in data_page2["items"]}
+    assert page1_ids.isdisjoint(page2_ids)
+
+    # Test projects skip/limit
+    proj_list_res = await client.get("/api/v1/projects?skip=0&limit=10")
+    assert proj_list_res.status_code == 200
+    assert proj_list_res.json()["limit"] == 10
+
+    # Test jobs skip/limit
+    jobs_list_res = await client.get(f"/api/v1/jobs?project_id={project_id}&skip=0&limit=10")
+    assert jobs_list_res.status_code == 200
+    assert jobs_list_res.json()["limit"] == 10
+

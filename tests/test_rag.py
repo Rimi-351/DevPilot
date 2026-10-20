@@ -323,3 +323,257 @@ async def test_compare_retrieval_modes():
         assert res.recall_at_1 == 1.0
         assert res.recall_at_3 == 1.0
         assert res.mrr == 1.0
+
+
+def test_citation_verification_service_unit() -> None:
+    """Verify that CitationVerificationService accurately audits citations, strips invalid/hallucinated tags,
+
+    normalizes valid references, and calculates grounding metrics.
+    """
+    from src.core.guardrails import CitationVerificationService
+
+    service = CitationVerificationService(max_unsupported_threshold=0.20)
+    fake_chunk_id = uuid.uuid4()
+    context_chunks = [
+        {
+            "index": 1,
+            "chunk_id": fake_chunk_id,
+            "document_id": uuid.uuid4(),
+            "filename": "database_guide.md",
+            "content": "PostgreSQL database migrations using Alembic manage schema evolution.",
+        },
+        {
+            "index": 2,
+            "chunk_id": uuid.uuid4(),
+            "document_id": uuid.uuid4(),
+            "filename": "database_guide.md",
+            "content": "SQLAlchemy 2.0 provides declarative mappings and async sessions.",
+        },
+    ]
+
+    # 1. Pure valid citations
+    raw1 = "PostgreSQL migrations manage schema evolution [1]. SQLAlchemy 2.0 provides declarative mappings [2]."
+    res1 = service.verify_and_filter_citations(raw1, context_chunks)
+    assert res1.is_grounded is True
+    assert res1.citation_correctness == 1.0
+    assert res1.unsupported_claims_rate == 0.0
+    assert len(res1.valid_citations) == 2
+    assert res1.invalid_citations == []
+    assert res1.cleaned_answer == raw1
+
+    # 2. Out-of-bounds citation index [99] and mixed multi-citation [1, 99]
+    raw2 = "PostgreSQL migrations manage schema evolution [1, 99]. The warp engine operates at lightspeed [88]."
+    res2 = service.verify_and_filter_citations(raw2, context_chunks)
+    assert res2.is_grounded is False
+    assert "[99]" in res2.invalid_citations
+    assert "[88]" in res2.invalid_citations
+    assert "[99]" not in res2.cleaned_answer
+    assert "[88]" not in res2.cleaned_answer
+    assert "[1]" in res2.cleaned_answer
+    assert "warp engine" in res2.cleaned_answer
+    assert res2.citation_correctness < 1.0
+
+    # 3. Fabricated chunk UUID
+    invented_uuid = "00000000-0000-0000-0000-000000000000"
+    raw3 = f"Some claim referencing unretrieved chunk [chunk: {invented_uuid}]."
+    res3 = service.verify_and_filter_citations(raw3, context_chunks)
+    assert res3.is_grounded is False
+    assert any(invented_uuid in c for c in res3.invalid_citations)
+    assert invented_uuid not in res3.cleaned_answer
+
+    # 4. Valid chunk UUID normalized to [1]
+    raw4 = f"Grounded fact referencing known chunk [chunk: {fake_chunk_id}]."
+    res4 = service.verify_and_filter_citations(raw4, context_chunks)
+    assert "[1]" in res4.cleaned_answer
+    assert len(res4.valid_citations) == 1
+    assert res4.invalid_citations == []
+
+
+@pytest.mark.asyncio
+async def test_rag_endpoint_exposes_grounding_and_citation_metrics(client: AsyncClient) -> None:
+    """Verify that the RAG endpoint exposes is_grounded, unsupported_claims_rate,
+
+    citation_correctness, and invalid_citations_stripped in the response.
+    """
+    # 1. Create project & upload document
+    proj_res = await client.post("/api/v1/projects", json={"name": "Grounding Metrics Project"})
+    project_id = proj_res.json()["id"]
+
+    doc_text = "FastAPI is a modern, fast web framework for building APIs with Python 3.8+."
+    files = {"file": ("fastapi.txt", doc_text.encode(), "text/plain")}
+    await client.post("/api/v1/documents/upload", data={"project_id": project_id}, files=files)
+
+    # 2. Query RAG endpoint
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "FastAPI web framework", "top_k": 3},
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    assert rag_data["is_grounded"] is True
+    assert rag_data["unsupported_claims_rate"] == 0.0
+    assert rag_data["citation_correctness"] == 1.0
+    assert rag_data["invalid_citations_stripped"] == []
+    assert len(rag_data["citations"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_rag_anti_hallucination_guardrail_strips_invalid_citations_and_flags_ungrounded(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that when an LLM synthesizes an answer containing hallucinated citation markers,
+
+    the guardrail strips them from the response, logs them, and marks the answer as ungrounded.
+    """
+    from unittest.mock import AsyncMock
+    from src.services.rag import get_rag_service
+
+    # 1. Create project & upload document
+    proj_res = await client.post("/api/v1/projects", json={"name": "Anti-Hallucination Project"})
+    project_id = proj_res.json()["id"]
+
+    doc_text = "PostgreSQL provides ACID compliant transactional database storage."
+    files = {"file": ("postgres.txt", doc_text.encode(), "text/plain")}
+    await client.post("/api/v1/documents/upload", data={"project_id": project_id}, files=files)
+
+    # 2. Mock LLM service to simulate hallucinated citations [1] and [99]
+    rag_service = get_rag_service()
+    hallucinated_answer = (
+        "PostgreSQL provides ACID compliant storage [1]. "
+        "The server utilizes dark energy gravitational containment fields [99]."
+    )
+
+    mock_generate = AsyncMock(return_value=(hallucinated_answer, []))
+    monkeypatch.setattr(rag_service.llm_service, "generate_grounded_answer", mock_generate)
+
+    # 3. Query RAG endpoint
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "PostgreSQL storage features", "top_k": 3},
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    # 4. Assert invalid citation [99] was stripped from answer
+    assert "[99]" not in rag_data["answer"]
+    assert "[1]" in rag_data["answer"]
+    assert "[99]" in rag_data["invalid_citations_stripped"]
+    assert rag_data["is_grounded"] is False
+    assert rag_data["citation_correctness"] == 0.5
+    assert rag_data["unsupported_claims_rate"] > 0.0
+    assert len(rag_data["citations"]) == 1
+    assert rag_data["citations"][0]["filename"] == "postgres.txt"
+
+
+@pytest.mark.asyncio
+async def test_rag_grounded_query_high_citation_correctness(client: AsyncClient) -> None:
+    """Test 1: Grounded query where all cited sources exist in the retrieved chunks.
+
+    Asserts high citation correctness (1.0), is_grounded=True, and valid chunk mappings.
+    """
+    proj_res = await client.post("/api/v1/projects", json={"name": "Grounded Citation Integrity Project"})
+    project_id = proj_res.json()["id"]
+
+    doc_text = (
+        "PostgreSQL database migrations using Alembic manage schema evolution. "
+        "Alembic automatically discovers model definitions from SQLAlchemy metadata."
+    )
+    files = {"file": ("alembic_docs.md", doc_text.encode(), "text/markdown")}
+    await client.post("/api/v1/documents/upload", data={"project_id": project_id}, files=files)
+
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "Alembic schema migrations", "top_k": 3},
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    assert rag_data["is_grounded"] is True
+    assert rag_data["citation_correctness"] == 1.0
+    assert rag_data["unsupported_claims_rate"] == 0.0
+    assert len(rag_data["citations"]) >= 1
+    assert rag_data["invalid_citations_stripped"] == []
+    for citation in rag_data["citations"]:
+        assert citation["filename"] == "alembic_docs.md"
+        assert citation["chunk_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_rag_ungrounded_hallucinated_source_rejection_telemetry(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test 2: Ungrounded query / hallucinated source test where the answer references non-existent chunks.
+
+    Asserts citation guardrail catches it, strips invalid citations, and returns ungrounded rejection telemetry.
+    """
+    from unittest.mock import AsyncMock
+    from src.services.rag import get_rag_service
+
+    proj_res = await client.post("/api/v1/projects", json={"name": "Hallucinated Source Rejection Project"})
+    project_id = proj_res.json()["id"]
+
+    doc_text = "DevPilot platform provides hybrid search retrieval with Reciprocal Rank Fusion."
+    files = {"file": ("architecture.txt", doc_text.encode(), "text/plain")}
+    await client.post("/api/v1/documents/upload", data={"project_id": project_id}, files=files)
+
+    rag_service = get_rag_service()
+    fake_chunk_id = "11111111-2222-3333-4444-555555555555"
+    hallucinated_answer = (
+        f"DevPilot uses RRF [1]. "
+        f"Unicorn propulsion engines accelerate the server into hyper-space [chunk: {fake_chunk_id}][99]."
+    )
+
+    mock_generate = AsyncMock(return_value=(hallucinated_answer, []))
+    monkeypatch.setattr(rag_service.llm_service, "generate_grounded_answer", mock_generate)
+
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "DevPilot retrieval engine", "top_k": 3},
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    # Verify invalid citations stripped and rejection telemetry recorded
+    assert rag_data["is_grounded"] is False
+    assert fake_chunk_id not in rag_data["answer"]
+    assert "[99]" not in rag_data["answer"]
+    assert "[1]" in rag_data["answer"]
+    assert len(rag_data["invalid_citations_stripped"]) >= 2
+    assert rag_data["citation_correctness"] < 1.0
+    assert rag_data["unsupported_claims_rate"] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_rag_negative_query_coca_cola_recipe_polite_rejection(client: AsyncClient) -> None:
+    """Verify that negative queries ('What is the secret recipe of Coca-Cola?' when no such document exists)
+
+    return polite rejections without hallucinating facts.
+    """
+    proj_res = await client.post("/api/v1/projects", json={"name": "Software Engineering Docs"})
+    project_id = proj_res.json()["id"]
+
+    tech_doc = (
+        "DevPilot backend architecture runs on Python 3.11 with FastAPI, "
+        "SQLAlchemy 2.0 async engine, and PostgreSQL 16 database."
+    )
+    files = {"file": ("tech_specs.txt", tech_doc.encode(), "text/plain")}
+    await client.post("/api/v1/documents/upload", data={"project_id": project_id}, files=files)
+
+    rag_res = await client.post(
+        f"/api/v1/projects/{project_id}/rag",
+        json={"query": "What is the secret recipe of Coca-Cola?", "top_k": 3},
+    )
+    assert rag_res.status_code == 200
+    rag_data = rag_res.json()
+
+    # Assert polite rejection without hallucinating ingredients or facts
+    assert "I do not have enough information in the provided documents to answer this question." in rag_data["answer"]
+    assert "coca-cola" not in rag_data["answer"].lower()
+    assert "recipe" not in rag_data["answer"].lower()
+    assert rag_data["citations"] == []
+    assert rag_data["is_grounded"] is True
+    assert rag_data["unsupported_claims_rate"] == 0.0
+    assert rag_data["citation_correctness"] == 1.0

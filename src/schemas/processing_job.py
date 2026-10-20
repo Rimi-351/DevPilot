@@ -1,5 +1,6 @@
 """Pydantic v2 schemas for ProcessingJob entity."""
 
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -30,6 +31,8 @@ class ProcessingJobUpdate(BaseSchema):
     status: Optional[JobStatus] = None
     result: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
 
 
 class ProcessingJobRead(ProcessingJobBase, TimestampSchema):
@@ -39,3 +42,5 @@ class ProcessingJobRead(ProcessingJobBase, TimestampSchema):
     status: JobStatus
     result: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None

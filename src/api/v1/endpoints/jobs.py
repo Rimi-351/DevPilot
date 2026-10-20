@@ -1,23 +1,21 @@
-"""ProcessingJob management and status polling REST endpoints."""
+"""ProcessingJob management and status polling REST endpoints with multi-tenant isolation."""
 
-import math
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
-from src.models.document import Document
+from src.core.security import get_current_tenant
 from src.models.processing_job import JobStatus, ProcessingJob
-from src.models.project import Project
 from src.schemas.common import PaginatedResponse
 from src.schemas.processing_job import (
     ProcessingJobCreate,
     ProcessingJobRead,
     ProcessingJobUpdate,
 )
+from src.services.job import JobService
 
 router = APIRouter()
 
@@ -30,81 +28,40 @@ router = APIRouter()
 )
 async def create_processing_job(
     job_in: ProcessingJobCreate,
+    tenant_id: str = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ProcessingJob:
-    """Register and enqueue a background processing job."""
-    # Verify project exists
-    project = await db.get(Project, job_in.project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project with ID '{job_in.project_id}' does not exist.",
-        )
-
-    # Verify document exists if provided
-    if job_in.document_id:
-        doc = await db.get(Document, job_in.document_id)
-        if not doc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document with ID '{job_in.document_id}' does not exist.",
-            )
-
-    job = ProcessingJob(
-        project_id=job_in.project_id,
-        document_id=job_in.document_id,
-        job_type=job_in.job_type,
-        status=JobStatus.PENDING,
-        payload=job_in.payload,
-    )
-    db.add(job)
-    await db.flush()
-    await db.refresh(job)
-    return job
+    """Register and enqueue a background processing job with tenant isolation."""
+    return await JobService.create_job(job_in=job_in, tenant_id=tenant_id, db=db)
 
 
 @router.get(
     "",
     response_model=PaginatedResponse[ProcessingJobRead],
     status_code=status.HTTP_200_OK,
-    summary="List Processing Jobs with pagination and filters",
+    summary="List Processing Jobs with bounded deterministic pagination",
 )
 async def list_processing_jobs(
     project_id: Optional[UUID] = Query(default=None, description="Filter by project ID"),
     job_status: Optional[JobStatus] = Query(default=None, description="Filter by status"),
-    page: int = Query(default=1, ge=1, description="Page number"),
-    page_size: int = Query(default=20, ge=1, le=100, description="Items per page"),
+    skip: int = Query(default=0, ge=0, description="Offset: number of items to skip"),
+    limit: int = Query(default=20, ge=1, le=100, description="Limit: items per page capped at 100"),
+    page: Optional[int] = Query(default=None, ge=1, description="Page number (1-indexed)"),
+    page_size: Optional[int] = Query(default=None, ge=1, le=100, description="Items per page"),
+    tenant_id: str = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Retrieve paginated processing jobs ordered by creation date."""
-    offset = (page - 1) * page_size
-
-    total_query = select(func.count()).select_from(ProcessingJob)
-    data_query = select(ProcessingJob).order_by(ProcessingJob.created_at.desc())
-
-    if project_id:
-        total_query = total_query.where(ProcessingJob.project_id == project_id)
-        data_query = data_query.where(ProcessingJob.project_id == project_id)
-    if job_status:
-        total_query = total_query.where(ProcessingJob.status == job_status)
-        data_query = data_query.where(ProcessingJob.status == job_status)
-
-    total_result = await db.execute(total_query)
-    total = total_result.scalar_one()
-
-    data_query = data_query.offset(offset).limit(page_size)
-    result = await db.execute(data_query)
-    items = result.scalars().all()
-
-    total_pages = math.ceil(total / page_size) if total > 0 else 0
-
-    return {
-        "items": items,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": total_pages,
-    }
+) -> dict[str, Any]:
+    """Retrieve paginated processing jobs scoped strictly to the authenticated tenant."""
+    return await JobService.list_jobs(
+        tenant_id=tenant_id,
+        db=db,
+        project_id=project_id,
+        job_status=job_status,
+        skip=skip,
+        limit=limit,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get(
@@ -115,16 +72,11 @@ async def list_processing_jobs(
 )
 async def get_processing_job(
     job_id: UUID,
+    tenant_id: str = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ProcessingJob:
-    """Retrieve processing job state by ID."""
-    job = await db.get(ProcessingJob, job_id)
-    if not job:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Processing job with ID '{job_id}' not found.",
-        )
-    return job
+    """Retrieve processing job state by ID with parent project tenant verification."""
+    return await JobService.get_job(job_id=job_id, tenant_id=tenant_id, db=db)
 
 
 @router.patch(
@@ -136,23 +88,27 @@ async def get_processing_job(
 async def update_processing_job(
     job_id: UUID,
     job_in: ProcessingJobUpdate,
+    tenant_id: str = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> ProcessingJob:
-    """Update processing status, payload result, or error message."""
-    job = await db.get(ProcessingJob, job_id)
-    if not job:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Processing job with ID '{job_id}' not found.",
-        )
+    """Update processing status, payload result, or error message with tenant check."""
+    return await JobService.update_job(job_id=job_id, job_in=job_in, tenant_id=tenant_id, db=db)
 
-    update_data = job_in.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(job, field, value)
 
-    await db.flush()
-    await db.refresh(job)
-    return job
+@router.patch(
+    "/{job_id}/status",
+    response_model=ProcessingJobRead,
+    status_code=status.HTTP_200_OK,
+    summary="Update Processing Job status with tenant ownership check",
+)
+async def update_processing_job_status(
+    job_id: UUID,
+    job_in: ProcessingJobUpdate,
+    tenant_id: str = Depends(get_current_tenant),
+    db: AsyncSession = Depends(get_db),
+) -> ProcessingJob:
+    """Dedicated endpoint to update job status and payload with strict tenant authorization."""
+    return await JobService.update_job(job_id=job_id, job_in=job_in, tenant_id=tenant_id, db=db)
 
 
 @router.delete(
@@ -162,13 +118,8 @@ async def update_processing_job(
 )
 async def delete_processing_job(
     job_id: UUID,
+    tenant_id: str = Depends(get_current_tenant),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Delete a processing job."""
-    job = await db.get(ProcessingJob, job_id)
-    if not job:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Processing job with ID '{job_id}' not found.",
-        )
-    await db.delete(job)
+    """Delete a processing job with parent project tenant ownership check."""
+    await JobService.delete_job(job_id=job_id, tenant_id=tenant_id, db=db)

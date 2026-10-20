@@ -139,6 +139,46 @@ async def test_auth_cross_tenant_access_returns_403(client: AsyncClient) -> None
     )
     assert res_cross_doc_del.status_code == 403
 
+    # 12. Tenant A creates a background processing job on Project A
+    res_job_create = await client.post(
+        "/api/v1/jobs",
+        json={"project_id": project_a_id, "job_type": "embedding_generation"},
+        headers=tenant_a_headers,
+    )
+    assert res_job_create.status_code == 201
+    job_a_id = res_job_create.json()["id"]
+
+    # 13. Tenant B attempts to read Tenant A's job -> 403 Forbidden
+    res_cross_job_get = await client.get(
+        f"/api/v1/jobs/{job_a_id}",
+        headers=tenant_b_headers,
+    )
+    assert res_cross_job_get.status_code == 403
+
+    # 14. Tenant B attempts to update Tenant A's job via PATCH /jobs/{job_id}/status -> 403 Forbidden
+    res_cross_job_patch = await client.patch(
+        f"/api/v1/jobs/{job_a_id}/status",
+        json={"status": "FAILED"},
+        headers=tenant_b_headers,
+    )
+    assert res_cross_job_patch.status_code == 403
+
+    # 15. Tenant B attempts to list jobs filtered by Project A -> 403 Forbidden
+    res_cross_job_list = await client.get(
+        f"/api/v1/jobs?project_id={project_a_id}",
+        headers=tenant_b_headers,
+    )
+    assert res_cross_job_list.status_code == 403
+
+    # 16. Tenant B calls GET /api/v1/jobs (unfiltered) -> Assert Tenant A's job is not leaked
+    res_unfiltered_jobs = await client.get(
+        "/api/v1/jobs",
+        headers=tenant_b_headers,
+    )
+    assert res_unfiltered_jobs.status_code == 200
+    b_job_ids = [j["id"] for j in res_unfiltered_jobs.json()["items"]]
+    assert job_a_id not in b_job_ids
+
 
 @pytest.mark.asyncio
 async def test_auth_valid_owner_lifecycle_success_200(client: AsyncClient) -> None:

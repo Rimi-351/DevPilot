@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import String, Text
+from sqlalchemy import Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -16,6 +16,9 @@ class Project(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Project entity representing a top-level workspace or repository."""
 
     __tablename__ = "projects"
+    __table_args__ = (
+        Index("ix_projects_tenant_created", "tenant_id", "created_at"),
+    )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
