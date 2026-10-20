@@ -5,7 +5,7 @@
 [![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0%20(async)-red?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
 [![CI Pipeline](https://img.shields.io/badge/CI-GitHub%20Actions-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tested with Pytest](https://img.shields.io/badge/Pytest-61%2F61%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tested with Pytest](https://img.shields.io/badge/Pytest-66%2F66%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 
 ---
 
@@ -215,7 +215,7 @@ uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
 
 ### 6. Run Test Suite & Benchmark Runner
 ```bash
-# Run all 61 automated tests
+# Run all 66 automated tests
 pytest -v
 
 # Run the 100-query multilingual benchmark sweep
@@ -314,7 +314,7 @@ e:\Devpilot\
 │   │   ├── metrics.py                # Hit@k, MRR, latency, unsupported claims rate
 │   │   └── benchmark.py              # Legacy evaluation runner helpers
 │   └── api/v1/endpoints/             # REST endpoints (auth, projects, docs, search, rag, agent)
-└── tests/                            # 61 integration tests (100% green)
+└── tests/                            # 66 integration tests (100% green)
 ```
 
 ---
