@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, List, Optional
+from typing import Any
 
 from src.services.embedding import get_embedding_service
 from src.services.retrieval.hybrid import bm25_search, reciprocal_rank_fusion
@@ -33,7 +33,8 @@ async def retrieve_chunks(
     search_mode: str = "vector_only",
     top_k: int = 3,
     chunk_limit: int = 10,
-    query_vector: Optional[list[float]] = None,
+    query_vector: list[float] | None = None,
+    reranker: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve and rank document chunks using the specified search mode.
 
@@ -93,9 +94,10 @@ async def retrieve_chunks(
 
     # 4. Cross-Encoder Reranking
     if search_mode == "hybrid_rerank":
-        reranker = get_reranker_service()
-        reranked = reranker.rerank(query, fused_candidates, top_k=top_k)
+        active_reranker = reranker if reranker is not None else get_reranker_service()
+        reranked = active_reranker.rerank(query, fused_candidates, top_k=top_k)
         return reranked
 
     # Fallback to dense if unknown mode
     return dense_scored[:top_k]
+

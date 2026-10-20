@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-20T09:27:58Z",
+  "timestamp": "2026-10-20T13:47:07Z",
   "dataset": "benchmarks/multilingual_gold_100.jsonl",
   "dataset_size": 100,
   "language_filter": "all",
@@ -23,8 +23,8 @@
       "total_queries": 100,
       "hit_at_k": 1.0,
       "mrr": 0.4437,
-      "p50_retrieval_ms": 7.56,
-      "p95_retrieval_ms": 11.06,
+      "p50_retrieval_ms": 7.91,
+      "p95_retrieval_ms": 12.63,
       "p50_generation_ms": 0.05,
       "p95_generation_ms": 0.07,
       "unsupported_claims_rate": 0.216,
@@ -55,8 +55,8 @@
       "total_queries": 100,
       "hit_at_k": 1.0,
       "mrr": 0.7475,
-      "p50_retrieval_ms": 7.96,
-      "p95_retrieval_ms": 11.27,
+      "p50_retrieval_ms": 8.69,
+      "p95_retrieval_ms": 11.42,
       "p50_generation_ms": 0.04,
       "p95_generation_ms": 0.06,
       "unsupported_claims_rate": 0.2152,
@@ -86,9 +86,9 @@
       "top_k": 5,
       "total_queries": 100,
       "hit_at_k": 1.0,
-      "mrr": 0.86,
-      "p50_retrieval_ms": 125.94,
-      "p95_retrieval_ms": 199.05,
+      "mrr": 1.0,
+      "p50_retrieval_ms": 153.15,
+      "p95_retrieval_ms": 189.12,
       "p50_generation_ms": 0.05,
       "p95_generation_ms": 0.07,
       "unsupported_claims_rate": 0.2487,
@@ -104,7 +104,7 @@
         "bangla": {
           "count": 33,
           "recall_at_5": 1.0,
-          "mrr": 0.5758
+          "mrr": 1.0
         },
         "banglish": {
           "count": 33,

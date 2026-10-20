@@ -2,17 +2,20 @@
 
 import json
 from pathlib import Path
+
 import pytest
 
-from src.services.retrieval.hybrid import bm25_search, reciprocal_rank_fusion, tokenize
-from src.services.retrieval.reranker import RerankerService
-from src.services.retrieval.pipeline import retrieve_chunks
 from src.evaluation.runner import (
-    load_benchmark_dataset,
-    evaluate_mode,
     check_unsupported_claims,
     compute_percentile,
 )
+from src.services.retrieval.hybrid import (
+    bm25_search,
+    reciprocal_rank_fusion,
+    tokenize,
+)
+from src.services.retrieval.pipeline import retrieve_chunks
+from src.services.retrieval.reranker import RerankerService
 
 
 def test_tokenize():
@@ -186,15 +189,15 @@ def test_bm25_index_cache():
         {"chunk_id": "c2", "content": "Sample content two", "project_id": "proj-123"},
     ]
 
-    index1, chunks1 = get_or_create_bm25_index(corpus)
-    index2, chunks2 = get_or_create_bm25_index(corpus)
+    index1, _chunks1 = get_or_create_bm25_index(corpus)
+    index2, _chunks2 = get_or_create_bm25_index(corpus)
 
     # Must be the exact same cached instance in memory
     assert index1 is index2
 
     # If corpus changes (e.g. new chunk added), cache rebuilds
     corpus_expanded = corpus + [{"chunk_id": "c3", "content": "Sample three", "project_id": "proj-123"}]
-    index3, chunks3 = get_or_create_bm25_index(corpus_expanded)
+    index3, _chunks3 = get_or_create_bm25_index(corpus_expanded)
     assert index3 is not index1
 
 
@@ -233,9 +236,6 @@ async def test_multilingual_embedding_service():
 
 
 def test_multilingual_gold_100_dataset_schema_and_distribution():
-    from pathlib import Path
-    import json
-
     gold_path = Path(__file__).resolve().parents[1] / "benchmarks" / "multilingual_gold_100.jsonl"
     assert gold_path.exists(), "benchmarks/multilingual_gold_100.jsonl must exist"
 
@@ -259,4 +259,93 @@ def test_multilingual_gold_100_dataset_schema_and_distribution():
     assert lang_counts["english"] == 34
     assert lang_counts["bangla"] == 33
     assert lang_counts["banglish"] == 33
+
+
+def test_has_bengali_script_detection():
+    from src.services.retrieval.reranker import has_bengali_script
+
+    # English query (no Bengali script)
+    assert has_bengali_script("What are the default values of CHUNK_SIZE?") is False
+    assert has_bengali_script("FastAPI with SQLAlchemy asyncpg") is False
+
+    # Banglish query (Latin characters, no Bengali script)
+    assert has_bengali_script("DevPilot a hybrid search kivabe kaj kore?") is False
+    assert has_bengali_script("API endpoint-e 403 Forbidden ashche") is False
+
+    # Pure Bangla query (Unicode Bengali script)
+    assert has_bengali_script("DevPilot কী ধরনের সিস্টেম এবং এটি কীভাবে সহায়তা করে?") is True
+    assert has_bengali_script("ডাটাবেস মাইগ্রেশন") is True
+
+    # Code-mixed query with Bengali script
+    assert has_bengali_script("DevPilot-এ দ্রুত কোড সার্চ করুন!") is True
+
+
+def test_script_aware_reranker_routing():
+    from src.services.retrieval.reranker import RerankerService
+
+    # 1. Monolingual English cross-encoder with script bypass enabled (Approach A)
+    mono_reranker = RerankerService(
+        model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        force_fallback=True,
+        enable_script_bypass=True,
+    )
+    assert mono_reranker.is_monolingual_english_model() is True
+
+    candidates = [
+        {"chunk_id": "c_correct", "content": "DevPilot এআই কোডিং সহকারী", "rrf_score": 0.05},
+        {"chunk_id": "c_distractor", "content": "DevPilot FastAPI API and PostgreSQL", "rrf_score": 0.02},
+    ]
+
+    # Native Bengali query should trigger script-aware guardrail bypass under Approach A
+    bangla_query = "DevPilot কী ধরনের সিস্টেম?"
+    reranked_bn = mono_reranker.rerank(bangla_query, candidates, top_k=2)
+
+    assert len(reranked_bn) == 2
+    assert reranked_bn[0]["chunk_id"] == "c_correct"
+    assert reranked_bn[0]["reranker_engine"] == "script_aware_bypass"
+    assert reranked_bn[0]["reranker_applied"] is True
+
+    # English query should route through cross-encoder / heuristic
+    english_query = "How to configure DevPilot?"
+    reranked_en = mono_reranker.rerank(english_query, candidates, top_k=2)
+    assert len(reranked_en) == 2
+    assert reranked_en[0]["reranker_engine"] in ("cross_encoder", "heuristic")
+
+    # 2. Multilingual cross-encoder (Approach B default)
+    multi_reranker = RerankerService(force_fallback=True)
+    assert multi_reranker.is_monolingual_english_model() is False
+    assert multi_reranker.model_name == "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+
+    # Multilingual cross-encoder processes native Bengali query through cross-attention (no bypass)
+    reranked_multi_bn = multi_reranker.rerank(bangla_query, candidates, top_k=2)
+    assert len(reranked_multi_bn) == 2
+    assert reranked_multi_bn[0]["reranker_engine"] in ("cross_encoder", "heuristic")
+
+
+def test_production_reranker_configuration_and_settings():
+    from src.core.config import settings
+    from src.services.retrieval.reranker import RerankerService, get_reranker_service
+
+    # 1. Verify core configuration settings defaults
+    assert settings.RERANKER_MODEL == "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    assert settings.RERANKER_ENABLE_SCRIPT_BYPASS is False
+    assert settings.RERANKER_BLEND_RRF_WEIGHT == 0.2
+
+    # 2. Verify default service initialization matches settings
+    default_svc = get_reranker_service()
+    assert default_svc.model_name == settings.RERANKER_MODEL
+    assert default_svc.enable_script_bypass == settings.RERANKER_ENABLE_SCRIPT_BYPASS
+    assert default_svc.blend_rrf_weight == settings.RERANKER_BLEND_RRF_WEIGHT
+
+    # 3. Verify custom overrides take precedence
+    custom_svc = RerankerService(
+        model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        enable_script_bypass=True,
+        blend_rrf_weight=0.5,
+    )
+    assert custom_svc.model_name == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert custom_svc.enable_script_bypass is True
+    assert custom_svc.blend_rrf_weight == 0.5
+
+
 

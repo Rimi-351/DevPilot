@@ -1,8 +1,8 @@
 # DevPilot Project Status
 
-**Current Target:** Week 6 — Bounded Agentic Workflows with Tool Calling & Structured Outputs  
-**Status:** **Weeks 1–6 COMPLETE** — Full Platform Built, Secured, Tested, Benchmarked & Agentic Workflows Live  
-**Last Verified:** `pytest -v` → **54/54 integration tests passing, 0 warnings**  
+**Current Target:** Week 9 — Backend Hardening, Object-Level Authorization, and Error Boundary Testing  
+**Status:** **Week 8 COMPLETED (Weeks 1–8 COMPLETE)** — Full Platform Built, Secured, Tested, Benchmarked, Agentic Workflows Live & Multilingual Production Champion Integrated  
+**Last Verified:** `pytest -v` → **61/61 integration tests passing, 0 warnings**  
 **CI / Docker:** Verified with GitHub Actions workflow and multi-stage Docker containers  
 
 ---
@@ -17,13 +17,51 @@
 | **Week 4** | Dense Vector Search (BGE-384) & Grounded RAG with Citations | ✅ Complete | 14 tests |
 | **Week 5** | Hybrid Search (BM25+RRF), Cross-Encoder Reranker, 50-Query Benchmark & Docker/CI | ✅ Complete | 13 tests |
 | **Week 6** | Bounded Agentic Workflows with Tool Calling & Structured Outputs | ✅ Complete | 6 tests (`test_agent.py`) |
-| **Total** | **Comprehensive Full-Stack AI Platform** | **100% Green** | **54/54 Passing** |
+| **Week 7** | Multilingual Evaluation Benchmark & System Rigor (100 Queries) | ✅ Complete | 4 tests |
+| **Week 8** | Make Retrieval Your Differentiator (Head-to-Head Evaluation & Production Champion) | ✅ Complete | 3 tests |
+| **Week 9** | Backend Hardening, Object-Level Authorization & Error Boundary Testing | ⏳ Up Next | Scheduled |
+| **Total** | **Comprehensive Full-Stack AI Platform** | **100% Green** | **61/61 Passing** |
 
 ---
 
 ## Completed Architecture Deliverables
 
-### Week 6 — Bounded Agentic Workflows with Tool Calling & Structured Outputs (Completed)
+### Week 8 — Make Retrieval Your Differentiator (COMPLETED)
+
+1. **Error Analysis of Non-Latin Tokenization Explosion (`reports/WEEK_8_ERROR_ANALYSIS.md`)**
+   - Isolated and diagnosed failure pattern where the monolingual English cross-encoder (`ms-marco-MiniLM-L-6-v2`) collapsed on native Bengali script (0.2788 MRR, 19 rank demotions) due to WordPiece 30k vocabulary fragmentation.
+   - Bengali script words disintegrated into 4–6 character atoms and combining vowel diacritics (`কার`), scattering cross-attention matrices and biasing rankings towards irrelevant passages with spurious Latin loanwords.
+2. **Script-Aware Dynamic Routing Dispatcher (Approach A, `src/services/retrieval/reranker.py`)**
+   - Implemented Unicode script detection (`[\u0980-\u09ff]`) via `has_bengali_script()` with dynamic bypass guardrail (`reranker_engine = "script_aware_bypass"`).
+   - Rescued native Bangla Recall@5 to 0.8485 (+75.0%) and eliminated all 19 rank demotions by routing directly to pristine Hybrid RRF rankings, maintaining an ultra-lean footprint of 148 ms P50 / 191 ms P95 at 86.7 MB RAM.
+3. **Multilingual Cross-Encoder Integration (Approach B, `src/services/retrieval/reranker.py`)**
+   - Integrated `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (12-layer XLM-RoBERTa backbone, 117.6M parameters) featuring a 250,000-token multilingual SentencePiece vocabulary.
+   - Evaluated native Bengali morphemes whole (`_সিস্টেম`, `_ডেটাবেস`), rocketing native Bangla MRR to **0.9051 (+224.6%)** and Recall@5 to **0.9697**.
+4. **Head-to-Head Empirical Benchmarking (`scripts/benchmark_head_to_head.py`, `reports/WEEK_8_OPTIMIZATION_RESULT.md`)**
+   - Empirically evaluated 4 candidate architectures across a 100-query held-out gold benchmark (34 English, 33 Bangla, 33 Banglish):
+     1. Baseline (Un-guarded Monolingual): 0.7015 Global MRR, 63.0% Rank #1
+     2. Approach A (Script-Aware Bypass): 0.7630 Global MRR, 64.0% Rank #1
+     3. Approach B (Multilingual CE `mmarco-L12`): 0.8675 Global MRR, 79.0% Rank #1
+     4. Approach A+B Hybrid (Neural-Symbolic Consensus): **0.8748 Global MRR, 80.0% Rank #1 hits**
+5. **Production Settings Wiring & RRF Blending (`src/core/config.py`, `src/services/retrieval/reranker.py`)**
+   - Designated and configured **Approach A+B Hybrid** as the primary default in `Settings`:
+     - `RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"`
+     - `RERANKER_ENABLE_SCRIPT_BYPASS = False`
+     - `RERANKER_BLEND_RRF_WEIGHT = 0.2`
+   - Formulated neural-symbolic consensus blending $80\%$ cross-encoder neural sigmoid with $20\%$ normalized Hybrid RRF consensus, stabilizing cross-lingual calibration drifts on English (0.8284) and Banglish (0.9394).
+   - Maintained full environment variable configurability for low-resource Edge deployments (Approach A).
+
+### Week 7 — Multilingual Benchmark & System Rigor (Completed)
+
+1. **Multilingual Unicode Tokenizer & BM25 Support (`src/services/retrieval/hybrid.py`)**
+   - Implemented `[\w\u0980-\u09ff\u200c\u200d]+` tokenization supporting Bengali script, combining vowel marks, ZWJ/ZWNJ, and Romanized Banglish.
+2. **Multilingual Embedding Service (`src/services/embedding.py`)**
+   - Configured `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` with FastEmbed fallback.
+3. **100-Query Multilingual Gold Standard Benchmark (`benchmarks/multilingual_gold_100.jsonl`)**
+   - Curated balanced dataset: 34 English technical queries, 33 pure Bengali script queries, 33 Romanized Banglish queries.
+4. **Language-Sliced Evaluation Runner (`src/evaluation/runner.py`)**
+   - Added `--lang {all,english,bangla,banglish}` and `--sweep` CLI support computing Recall@5, MRR, P50/P95 latencies, and unsupported claims rate per slice.
+
 
 1. **Agent Service Schemas (`src/services/agent/schemas.py`)**
    - Implemented `WorkflowPhase(str, Enum)`: `SEARCH`, `INSPECT`, `SUMMARIZE`, `PROPOSE`.
@@ -159,8 +197,35 @@ tests/test_ingestion.py ............................. [ 7 tests] -> PASSED
 tests/test_jobs.py .................................. [ 3 tests] -> PASSED
 tests/test_projects.py .............................. [ 6 tests] -> PASSED
 tests/test_rag.py ................................... [11 tests] -> PASSED
-tests/test_retrieval.py ............................. [ 7 tests] -> PASSED
+tests/test_retrieval.py ............................. [14 tests] -> PASSED
 tests/test_search.py ................................ [ 5 tests] -> PASSED
 
-Total: 54 passed in 22.10s (100% green)
+Total: 61 passed in 21.14s (100% green)
 ```
+
+---
+
+## Next Milestone Preview — Week 9: Backend Hardening, Object-Level Authorization, and Error Boundary Testing
+
+With retrieval differentiation and cross-encoder optimization completed at state-of-the-art accuracy (**0.8748 Global MRR, 80.0% Rank #1 hits**), Week 9 hardens the platform's backend infrastructure against production edge cases, security boundary breaches, and operational disruptions:
+
+### Planned Engineering Objectives
+
+1. **Object-Level Authorization & Fine-Grained RBAC (`src/core/security.py`, `src/models/`)**
+   - Implement fine-grained resource-level Access Control Lists (ACLs) and hierarchical permission boundaries (`TENANT_ADMIN`, `COLLABORATOR`, `READ_ONLY`).
+   - Guard every resource lookup (projects, documents, document chunks, and agent execution runs) with strict object-level ownership checks to prevent unauthorized reads, updates, or cascading deletions across tenant boundaries.
+
+2. **Error Boundary Testing & Fault Injection Suite (`tests/test_boundaries.py`)**
+   - Introduce automated chaos and fault injection test cases covering:
+     - **Database Disconnects & Pool Starvation:** Verifying graceful connection retries and pool recycling when PostgreSQL is transiently unavailable.
+     - **Upstream LLM Failures:** Simulating HTTP 429 rate limits, HTTP 503 provider outages, network timeouts, and malformed token streaming.
+     - **Embedding & ONNX Failures:** Handling ONNX Runtime exceptions, corrupt model weights, and out-of-memory states with predictable fallback pathways.
+     - **File Storage Failures:** Handling corrupted disk volumes, unexpected I/O cancellations, and missing local chunks.
+
+3. **Tenant-Scoped Rate Limiting & Concurrency Controls (`src/core/limiter.py`)**
+   - Implement tenant-level sliding-window rate limiters for search, RAG inference, and agent workflow dispatching to eliminate "noisy neighbor" resource starvation.
+   - Guard CPU-intensive background tasks (chunking, embedding generation, reranking) with concurrency-bounded `asyncio.Semaphore` queues.
+
+4. **Structured Audit Telemetry & Distributed Tracing (`src/core/telemetry.py`)**
+   - Standardize structured JSON audit logging across all API endpoints with mandatory `X-Request-ID` correlation headers.
+   - Instrument detailed query-level telemetry tracking latency breakdowns, subword token expansions, and memory footprints for production monitoring.

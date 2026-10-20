@@ -1,0 +1,145 @@
+{
+  "timestamp": "2026-10-20T13:55:50Z",
+  "results": [
+    {
+      "config_name": "1. Baseline (Un-guarded Monolingual)",
+      "model_name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+      "enable_script_bypass": false,
+      "blend_rrf_weight": 0.0,
+      "parameters": 22713601,
+      "memory_mb": 86.65,
+      "total_queries": 100,
+      "recall_at_5": 0.83,
+      "mrr": 0.7015,
+      "rank1_hits": 63,
+      "rank1_percent": 63.0,
+      "p50_retrieval_ms": 182.21,
+      "p95_retrieval_ms": 244.64,
+      "slices": {
+        "english": {
+          "count": 34,
+          "recall_at_5": 1.0,
+          "mrr": 0.8897,
+          "rank1_hits": 27
+        },
+        "bangla": {
+          "count": 33,
+          "recall_at_5": 0.4848,
+          "mrr": 0.2788,
+          "rank1_hits": 7
+        },
+        "banglish": {
+          "count": 33,
+          "recall_at_5": 1.0,
+          "mrr": 0.9303,
+          "rank1_hits": 29
+        }
+      }
+    },
+    {
+      "config_name": "2. Approach A (Script-Aware Bypass)",
+      "model_name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+      "enable_script_bypass": true,
+      "blend_rrf_weight": 0.0,
+      "parameters": 22713601,
+      "memory_mb": 86.65,
+      "total_queries": 100,
+      "recall_at_5": 0.95,
+      "mrr": 0.763,
+      "rank1_hits": 64,
+      "rank1_percent": 64.0,
+      "p50_retrieval_ms": 148.65,
+      "p95_retrieval_ms": 191.12,
+      "slices": {
+        "english": {
+          "count": 34,
+          "recall_at_5": 1.0,
+          "mrr": 0.8897,
+          "rank1_hits": 27
+        },
+        "bangla": {
+          "count": 33,
+          "recall_at_5": 0.8485,
+          "mrr": 0.4652,
+          "rank1_hits": 8
+        },
+        "banglish": {
+          "count": 33,
+          "recall_at_5": 1.0,
+          "mrr": 0.9303,
+          "rank1_hits": 29
+        }
+      }
+    },
+    {
+      "config_name": "3. Approach B (Multilingual Cross-Encoder)",
+      "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+      "enable_script_bypass": false,
+      "blend_rrf_weight": 0.0,
+      "parameters": 117641089,
+      "memory_mb": 448.77,
+      "total_queries": 100,
+      "recall_at_5": 0.99,
+      "mrr": 0.8675,
+      "rank1_hits": 79,
+      "rank1_percent": 79.0,
+      "p50_retrieval_ms": 221.35,
+      "p95_retrieval_ms": 419.55,
+      "slices": {
+        "english": {
+          "count": 34,
+          "recall_at_5": 1.0,
+          "mrr": 0.7922,
+          "rank1_hits": 22
+        },
+        "bangla": {
+          "count": 33,
+          "recall_at_5": 0.9697,
+          "mrr": 0.9051,
+          "rank1_hits": 29
+        },
+        "banglish": {
+          "count": 33,
+          "recall_at_5": 1.0,
+          "mrr": 0.9076,
+          "rank1_hits": 28
+        }
+      }
+    },
+    {
+      "config_name": "4. Approach A+B (RRF-Blended Multilingual)",
+      "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+      "enable_script_bypass": false,
+      "blend_rrf_weight": 0.2,
+      "parameters": 117641089,
+      "memory_mb": 448.77,
+      "total_queries": 100,
+      "recall_at_5": 0.98,
+      "mrr": 0.8748,
+      "rank1_hits": 80,
+      "rank1_percent": 80.0,
+      "p50_retrieval_ms": 232.12,
+      "p95_retrieval_ms": 419.04,
+      "slices": {
+        "english": {
+          "count": 34,
+          "recall_at_5": 0.9706,
+          "mrr": 0.8284,
+          "rank1_hits": 24
+        },
+        "bangla": {
+          "count": 33,
+          "recall_at_5": 0.9697,
+          "mrr": 0.8581,
+          "rank1_hits": 27
+        },
+        "banglish": {
+          "count": 33,
+          "recall_at_5": 1.0,
+          "mrr": 0.9394,
+          "rank1_hits": 29
+        }
+      }
+    }
+  ]
+}

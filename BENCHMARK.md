@@ -187,6 +187,59 @@ Telemetry captured across complete FSM execution cycles:
 ### 4. Integration Test Suite Verification
 
 - **Agent Test Suite (`tests/test_agent.py`)**: **6/6 passed** (0.60s)
-- **Full Platform Test Suite (`pytest -v`)**: **54/54 passed** (20.21s, 100% green)
+- **Full Platform Test Suite (`pytest -v`)**: **61/61 passed** (100% green)
 - **Syntax / Linter Verification**: `ruff check src/ tests/ --select E9,F63,F7,F82` passed with 0 errors.
+
+---
+
+## Week 8: Multilingual Reranker Sweep & Head-to-Head Architectural Comparison
+
+### 1. Overview & Problem Definition
+
+In Week 8, we evaluated DevPilot's retrieval subsystem across a 100-query multilingual gold-standard benchmark (`benchmarks/multilingual_gold_100.jsonl`), comprising 34 English technical queries, 33 native Bengali script queries, and 33 Romanized Banglish queries.
+
+Initial analysis revealed an acute linguistic divergence: while the monolingual English cross-encoder (`cross-encoder/ms-marco-MiniLM-L-6-v2`) performed exceptionally on English and Banglish (1.0000 MRR), it caused a catastrophic rank drop on native Bengali script (collapsing to **0.2788 MRR** and **0.4848 Recall@5**, inducing 19 ranking demotions) due to subword tokenization fragmentation and Latin loanword bias.
+
+To solve this, we implemented and empirically evaluated three successive remediation architectures against the baseline.
+
+### 2. Definitive 4-Way Architectural Comparison Matrix
+
+All four configurations were benchmarked end-to-end on the identical 100-query corpus using [`scripts/benchmark_head_to_head.py`](scripts/benchmark_head_to_head.py), with telemetry preserved in [`artifacts/head_to_head_comparison.json`](artifacts/head_to_head_comparison.json):
+
+| Metric | 1. Baseline (Un-guarded Monolingual) | 2. Approach A (Script-Aware Bypass) | 3. Approach B (Multilingual CE) | 4. Approach A+B Hybrid (Production Champion) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Model Checkpoint** | `ms-marco-MiniLM-L-6-v2` | `ms-marco-MiniLM-L-6-v2` | `mmarco-mMiniLMv2-L12-H384-v1` | `mmarco-mMiniLMv2-L12-H384-v1` |
+| **Backbone Architecture** | BERT (MiniLM-L6) | BERT (MiniLM-L6) | XLM-RoBERTa (mMiniLMv2-L12) | XLM-RoBERTa (mMiniLMv2-L12) |
+| **Transformer Layers** | 6 layers | 6 layers | 12 layers | 12 layers |
+| **Active Parameters** | 22,713,601 (22.7M) | 22,713,601 (22.7M) | 117,641,089 (117.6M) | 117,641,089 (117.6M) |
+| **FP32 Memory Footprint**| **86.65 MB** | **86.65 MB** | 448.77 MB | 448.77 MB |
+| **Global Recall@5** | 0.8300 | 0.9500 | **0.9900** | 0.9800 |
+| **Global MRR** | 0.7015 | 0.7630 | 0.8675 | **0.8748** 🏆 |
+| **Rank #1 Hits** | 63 / 100 (63.0%) | 64 / 100 (64.0%) | 79 / 100 (79.0%) | **80 / 100 (80.0%)** 🏆 |
+| **English MRR (34 queries)** | **0.8897** | **0.8897** | 0.7922 | **0.8284** *(+4.6%)* |
+| **Bangla MRR (33 queries)** | 0.2788 ❌ | 0.4652 *(+66.9%)* | **0.9051** 🚀 *(+224.6%)* | **0.8581** *(+207.8%)* |
+| **Banglish MRR (33 queries)**| 0.9303 | 0.9303 | 0.9076 | **0.9394** 🚀 *(+3.5%)* |
+| **Bangla Recall@5** | 0.4848 ❌ | 0.8485 | **0.9697** | **0.9697** |
+| **P50 Retrieval Latency**| 182.21 ms | **148.65 ms** ⚡ | 221.35 ms | 232.12 ms |
+| **P95 Retrieval Latency**| 244.64 ms | **191.12 ms** ⚡ | 419.55 ms | 419.04 ms *(< 500ms SLA)* |
+
+### 3. Architectural Rationale & Engineering Deep-Dive
+
+#### A. Tokenizer Mechanics: XLM-R SentencePiece (250k Vocab) vs. BERT WordPiece (30k Vocab)
+- **WordPiece Fragmentation:** `ms-marco-MiniLM-L-6-v2` utilizes a 30,522-token English WordPiece vocabulary. Because it lacks Bengali Unicode subwords, it decomposes a standard Bengali word into 4 to 6 character atoms and combining vowel diacritics (`কার`). A 6-word query fragments into 27–50 subwords, dispersing attention matrices across character fragments and destroying semantic phrase understanding.
+- **SentencePiece Representation:** `mmarco-mMiniLMv2-L12-H384-v1` employs a 250,000-token SentencePiece vocabulary trained on multilingual corpora. Bengali technical concepts (`_সিস্টেম`, `_ডেটাবেস`, `_মাইগ্রেশন`) are preserved as unified semantic morphemes, allowing cross-attention to evaluate full contextual relevance and elevating Bangla MRR to **0.9051**.
+
+#### B. 12-Layer vs. 6-Layer CPU Latency & Memory Footprint
+- MiniLM-L6 (6 layers, 22.7M parameters) consumes only **86.65 MB RAM** in FP32 and achieves **148.65 ms P50 / 191.12 ms P95** under Approach A because native script queries bypass neural inference to execute in ~8 ms via BM25/Vector RRF.
+- mMiniLMv2-L12 (12 layers, 117.6M parameters) has double the transformer depth and an $8.2\times$ larger embedding matrix (96M params), requiring **448.77 MB RAM**. On CPU, evaluating 10 candidate pairs per query incurs ~232 ms P50 and ~419 ms P95 latency, which remains well within DevPilot's interactive sub-500ms SLA.
+
+#### C. Neural-Symbolic Consensus: Why 20% RRF Score Blending Outperforms Pure Neural Reranking
+- In Configuration 4 (**Approach A+B Hybrid**), candidate scores blend neural cross-attention sigmoid probabilities with normalized Hybrid RRF consensus:
+  $$S_{\text{blended}} = (1 - \alpha) \cdot \sigma(S_{\text{CE}}) + \alpha \cdot \text{RRF}_{\text{norm}} \quad (\alpha = 0.20)$$
+- Pure cross-encoders occasionally suffer from cross-lingual calibration drifts on technical English passages. Blending 20% RRF consensus ($k=60$ merge of BM25 exact keywords and dense vector embeddings) acts as a regularizing prior, boosting English MRR from 0.7922 back to **0.8284 (+4.6%)** and Banglish MRR to **0.9394 (+3.5%)**, achieving our peak system precision of **0.8748 Global MRR and 80.0% Rank #1 hits**.
+
+### 4. Production Champion Selection
+
+Based on these trade-offs, **Approach A+B Hybrid** is configured as DevPilot's default production retrieval engine in [`src/core/config.py`](src/core/config.py) (`RERANKER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"`, `RERANKER_BLEND_RRF_WEIGHT = 0.2`), while **Approach A** remains our documented Edge / Low-Memory deployment profile.
+
 

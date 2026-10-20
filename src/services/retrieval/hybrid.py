@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List, Optional
-from rank_bm25 import BM25Okapi
+from typing import Any
 
+from rank_bm25 import BM25Okapi
 
 # Multilingual Unicode token pattern supporting English, Bangla script (\u0980-\u09ff),
 # Zero-width joiner/non-joiner (\u200c, \u200d), and code-mixed Latin Banglish tokens.
@@ -62,8 +62,8 @@ def get_or_create_bm25_index(
 
 def clear_bm25_cache() -> None:
     """Clear the in-memory BM25 index cache."""
-    global _bm25_cache
     _bm25_cache.clear()
+
 
 
 def bm25_search(

@@ -1,7 +1,6 @@
 """Core configuration settings using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,6 +47,22 @@ class Settings(BaseSettings):
     # Multilingual Vector Embedding Configuration
     EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     EMBEDDING_DIMENSIONS: int = 384
+
+    # Multilingual Cross-Encoder Reranker Configuration
+    RERANKER_MODEL: str = Field(
+        default="cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+        description="Cross-encoder model for semantic reranking (e.g. cross-encoder/mmarco-mMiniLMv2-L12-H384-v1 or cross-encoder/ms-marco-MiniLM-L-6-v2)",
+    )
+    RERANKER_ENABLE_SCRIPT_BYPASS: bool = Field(
+        default=False,
+        description="Enable script-aware bypass to Hybrid RRF on monolingual models for native Bengali script",
+    )
+    RERANKER_BLEND_RRF_WEIGHT: float = Field(
+        default=0.2,
+        description="Weight of normalized Hybrid RRF consensus blended into cross-encoder sigmoid probability",
+    )
+
+
 
 
 @lru_cache
