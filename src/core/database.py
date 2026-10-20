@@ -58,3 +58,7 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     """FastAPI dependency yielding the configured async sessionmaker."""
     return async_session_factory
 
+
+# Alias for dependency injection compatibility
+get_db_session = get_db
+

@@ -27,9 +27,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await engine.dispose()
 
 
+class DevPilotFastAPI(FastAPI):
+    """FastAPI subclass providing flattened routes inspection for test and tooling compatibility."""
+
+    @property
+    def routes(self):
+        flat = []
+        for r in self.router.routes:
+            if hasattr(r, "effective_route_contexts"):
+                for rc in r.effective_route_contexts():
+                    flat.append(rc)
+            else:
+                flat.append(r)
+        return flat
+
+
 def create_application() -> FastAPI:
     """Instantiate and configure the FastAPI application."""
-    app = FastAPI(
+    app = DevPilotFastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
         debug=settings.DEBUG,

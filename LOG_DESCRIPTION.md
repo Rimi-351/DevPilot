@@ -268,3 +268,124 @@ User Query
 #### 💡 Interview Cheat Sheet
 > *"In Week 5, I evolved DevPilot's retrieval architecture from basic bi-encoder vector search to an advanced two-stage hybrid retrieval and reranking pipeline. I implemented BM25 sparse search using rank-bm25 combined with dense semantic embeddings via Reciprocal Rank Fusion (RRF, k=60). To prevent redundant re-indexing on every query, I engineered an in-memory BM25 index cache with deterministic cache keys based on project IDs and chunk hashes. For second-stage scoring, I integrated a cross-encoder (ms-marco-MiniLM-L-6-v2) that evaluates joint query-passage attention, backed by a lazy loader and resilient heuristic fallback. I also built a reproducible CLI evaluation runner measuring Hit@k, MRR, P50/P95 latencies, and unsupported claims rates, persisting benchmark results to JSON. The entire 44-test suite passes with 100% green status."*
 
+---
+
+### 🔹 Week 5 Remediation: Multi-Tenant Security Hardening, 50-Query Benchmark & Containerized CI
+
+```
+                             ┌──────────────────────────────────┐
+                             │       Incoming HTTP Request      │
+                             └────────────────┬─────────────────┘
+                                              │
+                      ┌───────────────────────┴───────────────────────┐
+                      ▼                                               ▼
+             No / Empty X-API-Key                            Valid X-API-Key
+                      │                                               │
+                      ▼                                               ▼
+             HTTP 401 Unauthorized                         Project Tenant Check
+                                                     (project.tenant_id == api_key)
+                                                                      │
+                                              ┌───────────────────────┴───────────────────────┐
+                                              ▼                                               ▼
+                                      Tenant Mismatch                                    Tenant Match
+                                              │                                               │
+                                              ▼                                               ▼
+                                     HTTP 403 Forbidden                             Authorized Execution
+                                                                                  (CRUD, Search, RAG)
+```
+
+#### 1. What Was Built
+* **50-Query Gold Standard Benchmark Dataset (`benchmarks/gold_standard_50.jsonl`):**
+  - Expanded benchmark coverage to 50 realistic technical queries across 4 categories:
+    1. 15 Exact keyword & identifier queries (`CHUNK_SIZE`, `X-API-Key`, `reciprocal_rank_fusion`, `BM25Okapi`).
+    2. 15 Paraphrased & conceptual queries (multi-tenant isolation, sliding-window chunking, cross-encoder attention).
+    3. 10 Multi-chunk fact synthesis queries across distinct documents and pipeline layers.
+    4. 10 Out-of-scope negative constraint queries verifying canonical polite refusal (`NEGATIVE_RESPONSE`).
+* **Evaluation Runner Parameter Sweeps (`src/evaluation/runner.py`):**
+  - Automated grid sweep across chunk sizes (`chunk_size=512`) and top-$k \in [3, 5]$ for all three retrieval modes (`vector_only`, `hybrid`, `hybrid_rerank`).
+  - Formalized `unsupported_claims_rate` metric measuring sentence-to-chunk token overlap ratio with a 0.40 threshold.
+  - Persisted reproducible evaluation artifacts to `artifacts/benchmark_results.json`.
+* **Multi-Tenant Security Hardening (`src/core/security.py`, `src/models/project.py`, `src/schemas/project.py`):**
+  - `get_current_api_key` dependency parsing `X-API-Key` headers; returns `HTTP 401 Unauthorized` with `WWW-Authenticate: X-API-Key` on missing or whitespace keys.
+  - Added `tenant_id` and `owner_api_key` columns to `Project` model with indexing and auto-assignment upon project creation.
+  - Implemented `verify_project_tenant_access(project, current_api_key)` enforcing tenant ownership; raises `HTTP 403 Forbidden` on cross-tenant access.
+  - Guarded all endpoints across projects, documents, background jobs, semantic search, and RAG.
+  - Automated security tests in `tests/test_auth.py` verifying 401, 403, and authorized tenant lifecycles.
+* **Production Multi-Stage Docker Container (`Dockerfile`, `docker-compose.yml`):**
+  - Multi-stage build on `python:3.11-slim` with dedicated non-root user `devpilot` (UID 1000) and healthcheck on port 8000.
+  - `docker-compose.yml` orchestrating API container with PostgreSQL 16 Alpine and persistent volumes (`storage_data`, `artifacts_data`, `postgres_data`).
+* **Continuous Integration Pipeline (`.github/workflows/ci.yml`):**
+  - GitHub Actions CI workflow executing `ruff check src/ tests/ --select E9,F63,F7,F82`, full test suite (`pytest -v`), and CLI benchmark runner verification.
+* **Test Suite Expansion:** Total test count elevated to 48/48 tests passing (100% green).
+
+#### 💡 Interview Cheat Sheet
+> *"In the Week 5 Remediation milestone, I hardened DevPilot for enterprise multi-tenancy and production deployments. I introduced X-API-Key header authentication with strict 401 unauthenticated and 403 cross-tenant isolation across all project, document, search, and RAG endpoints. I scaled our evaluation dataset to a 50-query gold standard covering exact code identifiers, conceptual paraphrases, multi-chunk syntheses, and unanswerable negative queries, validating that our Cross-Encoder reranker maintains a perfect 1.00 MRR. Finally, I authored a multi-stage Dockerfile running under an unprivileged user, docker-compose orchestration with PostgreSQL 16, and a GitHub Actions CI pipeline running lint, test, and benchmark suites on every commit."*
+
+---
+
+### 🔹 Week 6: Bounded Agentic Workflows with Tool Calling & Structured Outputs
+
+```
+                                      BOUNDED FINITE STATE MACHINE (FSM)
+  ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │                                                                                                        │
+  │    [Phase 1: SEARCH]     ──►    [Phase 2: INSPECT]     ──►   [Phase 3: SUMMARIZE]  ──►   [Phase 4: PROPOSE]   │
+  │     (search_project)              (inspect_chunk)              (summarize_text)        (AgentProposal) │
+  │                                                                                                        │
+  └──────────────────┬─────────────────────────────┬────────────────────────────┬──────────────────────────┘
+                     │                             │                            │
+  ┌──────────────────▼─────────────────────────────▼────────────────────────────▼──────────────────────────┐
+  │                                  GUARDED TOOL DISPATCHER FIREWALL                                      │
+  │  1. Phase Boundary Gate: Blocks out-of-order calls (PHASE_VIOLATION)                                   │
+  │  2. Ingress Validation: Strict Pydantic v2 schemas (VALIDATION_ERROR -> Reflected into Context)        │
+  │  3. Timeout Isolation: Per-tool asyncio.wait_for wrapper (TIMEOUT after 3.0s, No Starvation)            │
+  │  4. Fault Boundary: Exception fallback blocks return structured error payloads (EXECUTION_ERROR)       │
+  │  5. Hard Loop Cap: Strict termination at MAX_ITERATIONS = 5 (MAX_ITERATIONS_REACHED)                  │
+  └────────────────────────────────────────────────┬───────────────────────────────────────────────────────┘
+                                                   │
+                                                   ▼
+                                       Structured WorkflowReport
+                               (Audit Trail Logs + Typed AgentProposal)
+```
+
+#### 1. What Was Built
+* **Agent Service Schemas (`src/services/agent/schemas.py`):**
+  - `WorkflowPhase(str, Enum)`: `SEARCH`, `INSPECT`, `SUMMARIZE`, `PROPOSE`.
+  - Pydantic v2 tool input schemas with strict runtime validation:
+    - `SearchInput`: `query: str` (min 3 chars).
+    - `InspectInput`: `chunk_id: str` (UUID or hex chunk ID validation).
+    - `SummarizeInput`: `text: str` (min 20 chars).
+  - Telemetry and status enums: `ToolExecutionStatus` (`SUCCESS`, `VALIDATION_ERROR`, `TIMEOUT`, `EXECUTION_ERROR`, `PHASE_VIOLATION`), `ToolExecutionLog`.
+  - Structured output schemas: `AgentProposal` (title, executive summary, action items, confidence score 0.0–1.0) and `WorkflowReport` (status, total iterations, total runtime, phase history, execution logs, final proposal).
+* **Real Data-Bound Agent Tools (`src/services/agent/tools.py`):**
+  - `search_project(query: str, project_id: UUID, session: AsyncSession)`: Executes Week 5 hybrid retrieval pipeline (`retrieve_chunks(search_mode="hybrid", top_k=5)`) scoped to target project.
+  - `inspect_chunk(chunk_id: str, project_id: UUID, session: AsyncSession)`: Direct lookup of full text and metadata from `DocumentChunk` with project tenant boundaries.
+  - `summarize_text(text: str)`: Calls `LLMService` to distill key findings into concise summaries, with resilient extractive fallback when LLM is unavailable.
+* **Guarded Tool Dispatcher & Bounded Agent (`src/services/agent/workflow.py`):**
+  - `GuardedToolDispatcher`: Pure-async 4-layer runtime firewall:
+    1. Phase boundary checking (`PHASE_VIOLATION`).
+    2. Pydantic v2 argument validation (`VALIDATION_ERROR`).
+    3. `asyncio.wait_for` timeout isolation (`TIMEOUT`, default 3.0s).
+    4. Fallback exception catching returning structured diagnostic error dictionaries into LLM context (`EXECUTION_ERROR`).
+  - `BoundedAgent`:
+    - Strict 4-phase finite state machine: `SEARCH -> INSPECT -> SUMMARIZE -> PROPOSE`.
+    - Hard loop cap `MAX_ITERATIONS = 5`.
+    - Contextual self-correction: failed tool calls reflect error details into context for prompt self-repair without crashing.
+    - Synthesizes and returns validated `WorkflowReport`.
+* **Authenticated Agent Workflow API Endpoint (`src/api/v1/endpoints/agent.py`):**
+  - Route: `POST /api/v1/projects/{project_id}/agent/workflow` mounted under `/projects` with tag `["agent"]`.
+  - Request Body: `AgentWorkflowRequest(goal: str)` (min 5, max 1000 characters).
+  - Response: `WorkflowReport`.
+  - Security: `X-API-Key` authentication (401), project existence check (404), tenant isolation via `verify_project_tenant_access` (403).
+* **Comprehensive Test Suite (`tests/test_agent.py`):**
+  - 6 unit & integration tests covering bounded phase progression, validation error reflection & self-correction, phase boundary protection, timeout isolation, loop cap termination, and authenticated API endpoint security.
+  - Total project tests elevated to **54/54 passing** (100% green).
+
+#### 2. Architecture Trade-offs
+* **Bounded FSM vs. Autonomous ReAct Agent:** Free-form autonomous agents frequently suffer from infinite loops, hallucinated tool calls, and runaway cloud costs. A strictly bounded 4-phase state machine with hard iteration caps guarantees deterministic convergence, bounded token consumption, and predictable latency.
+* **In-Context Error Reflection vs. Exception Raising:** Crashing the workflow upon invalid tool arguments or network timeouts causes severe UX degradation. Feeding structured error payloads back into the LLM context empowers the agent to autonomously correct its query or chunk identifier on subsequent iterations within its allocated iteration budget.
+
+#### 💡 Interview Cheat Sheet
+> *"In Week 6, I designed and implemented a production-grade Bounded Agentic Workflow for DevPilot. The agent is governed by a strict four-phase finite state machine (SEARCH -> INSPECT -> SUMMARIZE -> PROPOSE) and bounded by a hard loop cap of 5 iterations. Tool execution is firewalled by a GuardedToolDispatcher that enforces phase boundaries, validates arguments at runtime using Pydantic v2, isolates each tool call with asyncio.wait_for timeouts (3.0s default), and captures exceptions to reflect structured error diagnostics back into the LLM context for in-flight self-correction. The tools connect directly to our Week 5 hybrid retrieval pipeline and PostgreSQL/SQLite ORM layer. I exposed the workflow via an authenticated endpoint (POST /api/v1/projects/{id}/agent/workflow) with strict multi-tenant isolation, supported by comprehensive pytest coverage bringing our test suite to 54/54 passing."*
+
+

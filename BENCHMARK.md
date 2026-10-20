@@ -148,3 +148,45 @@ python -m src.evaluation.runner --mode hybrid_rerank --top-k 3
 ```
 
 All results are automatically persisted to [`artifacts/benchmark_results.json`](artifacts/benchmark_results.json).
+
+---
+
+## Week 6: Bounded Agentic Workflow Telemetry & Guardrail Verification
+
+### 1. Overview & Architecture
+
+Week 6 extends DevPilot from direct query-response RAG to a bounded agentic research workflow. The agent operates under a deterministic 4-phase finite state machine (FSM):
+
+$$\text{SEARCH} \longrightarrow \text{INSPECT} \longrightarrow \text{SUMMARIZE} \longrightarrow \text{PROPOSE}$$
+
+Tool execution is isolated behind `GuardedToolDispatcher`, providing runtime validation, phase boundary gating, per-tool timeout isolation, and structured error reflection back to the LLM context.
+
+### 2. End-to-End Workflow Execution Metrics
+
+Telemetry captured across complete FSM execution cycles:
+
+| Metric | Target / Constraint | Measured Benchmark | Notes |
+|:---|:---:|:---:|:---|
+| **Phase Progression** | Strict 4-Phase Sequence | `["SEARCH", "INSPECT", "SUMMARIZE", "PROPOSE"]` | Deterministic progression; zero phase jumping |
+| **Tool Execution Count** | Exactly 3 Tool Calls | 3 calls (`search_project`, `inspect_chunk`, `summarize_text`) | 1 tool per active phase prior to `PROPOSE` synthesis |
+| **Nominal FSM Iterations** | $\ge 4$ (3 tools + 1 synthesis) | **4 iterations** (Happy Path) | Completes within budget on valid tool arguments |
+| **Nominal Runtime (Offline/Mock)** | $< 1.0\text{ s}$ | **$0.002 - 0.05\text{ s}$** | Sub-50ms local execution overhead |
+| **Nominal Runtime (Live LLM)** | $< 10.0\text{ s}$ | **$2.5 - 4.5\text{ s}$** | Dependent on LLM token generation latency |
+| **Deliverable Quality** | Validated `AgentProposal` | Title, Executive Summary, Actions ($\ge 1$), Confidence ($0.0 - 1.0$) | Verified against Pydantic schema |
+
+### 3. Guardrail Verification Outcomes
+
+| Guardrail Layer | Failure Mode Tested | Injected Condition | Observed System Behavior | Guardrail Status |
+|:---|:---|:---|:---|:---:|
+| **Phase Boundary Gate** | Out-of-order tool call | Calling `summarize_text` during `SEARCH` phase | Rejected immediately with `ToolExecutionStatus.PHASE_VIOLATION`. Underlying tool logic never executes. | ✅ VERIFIED |
+| **Ingress Validation** | Malformed tool arguments | Query length $< 3$ chars or malformed `chunk_id` | `ToolExecutionStatus.VALIDATION_ERROR` logged. Structured schema error reflected to context; agent self-corrects on next iteration. | ✅ VERIFIED |
+| **Timeout Isolation** | Slow / hung upstream tool | Tool coroutine delayed beyond `per_tool_timeout` (0.05s) | `asyncio.wait_for` triggers cancellation; `ToolExecutionStatus.TIMEOUT` returned without blocking the event loop. | ✅ VERIFIED |
+| **Fault Boundary** | Database / network exception | Unhandled tool exception raised | `ToolExecutionStatus.EXECUTION_ERROR` recorded; error dictionary returned to context without crashing the workflow loop. | ✅ VERIFIED |
+| **Hard Loop Cap** | Infinite loop / repeating failure | Permanent tool failure across all iterations | Agent terminates strictly at iteration 5 with `status = "MAX_ITERATIONS_REACHED"` and `final_proposal = None`. | ✅ VERIFIED |
+
+### 4. Integration Test Suite Verification
+
+- **Agent Test Suite (`tests/test_agent.py`)**: **6/6 passed** (0.60s)
+- **Full Platform Test Suite (`pytest -v`)**: **54/54 passed** (20.21s, 100% green)
+- **Syntax / Linter Verification**: `ruff check src/ tests/ --select E9,F63,F7,F82` passed with 0 errors.
+

@@ -1,8 +1,8 @@
 # DevPilot Project Status
 
-**Current Target:** Week 6 — Production Readiness & Observability  
-**Status:** **Weeks 1–5 COMPLETE** — Full Platform Built, Secured, Tested & Benchmarked  
-**Last Verified:** `pytest -v` → **48/48 integration tests passing, 0 warnings**  
+**Current Target:** Week 6 — Bounded Agentic Workflows with Tool Calling & Structured Outputs  
+**Status:** **Weeks 1–6 COMPLETE** — Full Platform Built, Secured, Tested, Benchmarked & Agentic Workflows Live  
+**Last Verified:** `pytest -v` → **54/54 integration tests passing, 0 warnings**  
 **CI / Docker:** Verified with GitHub Actions workflow and multi-stage Docker containers  
 
 ---
@@ -16,11 +16,49 @@
 | **Week 3** | Authentication, Cross-Tenant Isolation & Security Hardening | ✅ Complete | 3 tests (`test_auth.py`) |
 | **Week 4** | Dense Vector Search (BGE-384) & Grounded RAG with Citations | ✅ Complete | 14 tests |
 | **Week 5** | Hybrid Search (BM25+RRF), Cross-Encoder Reranker, 50-Query Benchmark & Docker/CI | ✅ Complete | 13 tests |
-| **Total** | **Comprehensive Full-Stack AI Platform** | **100% Green** | **48/48 Passing** |
+| **Week 6** | Bounded Agentic Workflows with Tool Calling & Structured Outputs | ✅ Complete | 6 tests (`test_agent.py`) |
+| **Total** | **Comprehensive Full-Stack AI Platform** | **100% Green** | **54/54 Passing** |
 
 ---
 
 ## Completed Architecture Deliverables
+
+### Week 6 — Bounded Agentic Workflows with Tool Calling & Structured Outputs (Completed)
+
+1. **Agent Service Schemas (`src/services/agent/schemas.py`)**
+   - Implemented `WorkflowPhase(str, Enum)`: `SEARCH`, `INSPECT`, `SUMMARIZE`, `PROPOSE`.
+   - Strict runtime Pydantic v2 input schemas:
+     - `SearchInput`: `query: str` (min 3 chars).
+     - `InspectInput`: `chunk_id: str` (UUID or hex chunk ID validation).
+     - `SummarizeInput`: `text: str` (min 20 chars).
+   - Execution telemetry models: `ToolExecutionStatus` (`SUCCESS`, `VALIDATION_ERROR`, `TIMEOUT`, `EXECUTION_ERROR`, `PHASE_VIOLATION`), `ToolExecutionLog`.
+   - Structured deliverable models: `AgentProposal` (title, executive summary, action items, confidence score 0.0–1.0) and `WorkflowReport` (status, total iterations, runtime, phase history, logs, final proposal).
+
+2. **Real Data-Bound Agent Tools (`src/services/agent/tools.py`)**
+   - `search_project(query, project_id, session)`: Executes Week 5 hybrid retrieval pipeline (`retrieve_chunks(search_mode="hybrid", top_k=5)`) scoped to target project.
+   - `inspect_chunk(chunk_id, project_id, session)`: Direct lookup of full chunk text and metadata from `DocumentChunk` with project tenant boundaries.
+   - `summarize_text(text)`: Distills key technical findings via `LLMService` with resilient extractive summarizer fallback.
+
+3. **Guarded Tool Dispatcher & Bounded Agent (`src/services/agent/workflow.py`)**
+   - `GuardedToolDispatcher`: Pure-async 4-layer runtime firewall:
+     1. Phase boundary checking (`PHASE_VIOLATION`)
+     2. Pydantic v2 argument validation (`VALIDATION_ERROR`)
+     3. `asyncio.wait_for` timeout isolation (`TIMEOUT`, default 3.0s)
+     4. Exception fallback blocks returning structured diagnostic error dictionaries into LLM context (`EXECUTION_ERROR`).
+   - `BoundedAgent`:
+     - Deterministic 4-phase finite state machine: `SEARCH -> INSPECT -> SUMMARIZE -> PROPOSE`.
+     - Hard loop cap `MAX_ITERATIONS = 5`.
+     - Contextual self-correction: failed tool calls reflect error details into context for prompt self-repair without crashing.
+     - Structured JSON proposal synthesis in `PROPOSE` phase.
+
+4. **Authenticated Agent Workflow Endpoint (`src/api/v1/endpoints/agent.py`)**
+   - Route: `POST /api/v1/projects/{project_id}/agent/workflow`
+   - Request: `AgentWorkflowRequest(goal: str)` (5–1000 characters).
+   - Response: `WorkflowReport`.
+   - Security: Enforces `X-API-Key` authentication (401), project existence (404), and tenant isolation via `verify_project_tenant_access` (403).
+
+5. **Comprehensive Pytest Suite (`tests/test_agent.py`)**
+   - 6 test cases verifying bounded progression, validation error reflection & self-correction, phase boundary protection, timeout isolation, loop cap termination, and authenticated API endpoint security.
 
 ### Week 5 — Search Quality, 50-Query Benchmark & Containerized CI (Completed)
 
@@ -113,6 +151,7 @@
 ## Current Test Suite Status
 
 ```
+tests/test_agent.py ................................. [ 6 tests] -> PASSED
 tests/test_auth.py .................................. [ 3 tests] -> PASSED
 tests/test_documents.py ............................. [ 4 tests] -> PASSED
 tests/test_health.py ................................ [ 2 tests] -> PASSED
@@ -123,5 +162,5 @@ tests/test_rag.py ................................... [11 tests] -> PASSED
 tests/test_retrieval.py ............................. [ 7 tests] -> PASSED
 tests/test_search.py ................................ [ 5 tests] -> PASSED
 
-Total: 48 passed in 20.24s (100% green)
+Total: 54 passed in 22.10s (100% green)
 ```

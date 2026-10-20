@@ -5,13 +5,13 @@
 [![SQLAlchemy 2.0](https://img.shields.io/badge/SQLAlchemy-2.0%20(async)-red?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org)
 [![Docker](https://img.shields.io/badge/Docker-Multi--Stage-2496ED?logo=docker&logoColor=white)](https://www.docker.com)
 [![CI Pipeline](https://img.shields.io/badge/CI-GitHub%20Actions-brightgreen?logo=githubactions&logoColor=white)](.github/workflows/ci.yml)
-[![Tested with Pytest](https://img.shields.io/badge/Pytest-48%2F48%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
+[![Tested with Pytest](https://img.shields.io/badge/Pytest-54%2F54%20passing-brightgreen?logo=pytest&logoColor=white)](https://pytest.org)
 
 ---
 
-## Milestone Status — Weeks 1–5 Complete
+## Milestone Status — Weeks 1–6 Complete
 
-DevPilot is a production-grade, multi-tenant AI document intelligence platform built with modern async Python standards. At the **Week 5 milestone**, the platform features a complete end-to-end retrieval and grounded answer synthesis pipeline:
+DevPilot is a production-grade, multi-tenant AI document intelligence platform built with modern async Python standards. At the **Week 6 milestone**, the platform features a complete bounded agentic workflow alongside its hybrid retrieval and grounded answer synthesis pipeline:
 
 | Capability | Status | Notes |
 |:---|:---:|:---|
@@ -24,6 +24,7 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
 | **Reciprocal Rank Fusion (RRF)** | ✅ | Formula-based candidate blending with constant $k=60$ |
 | **Cross-Encoder Reranker** | ✅ | `cross-encoder/ms-marco-MiniLM-L-6-v2` delivering **1.00 MRR** with fallback |
 | **Grounded RAG with Provenance** | ✅ | Synthesizes grounded answers with inline citations `[1]` and start/end character offsets |
+| **Bounded Agentic Workflows** | ✅ | 4-phase FSM (`SEARCH -> INSPECT -> SUMMARIZE -> PROPOSE`), GuardedToolDispatcher, Pydantic v2 validation, per-tool timeout isolation, max 5 loop cap, structured `WorkflowReport` |
 | **50-Query Parameter Sweep Benchmark** | ✅ | Automated CLI benchmark measuring Hit@k, MRR, P50/P95 latencies, and unsupported claims |
 | **Docker & Docker Compose** | ✅ | Multi-stage build on `python:3.11-slim`, non-root user `devpilot`, persisted storage |
 | **Continuous Integration (CI)** | ✅ | GitHub Actions workflow executing linting, `pytest`, and benchmark verification |
@@ -48,6 +49,10 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                     │                           Reciprocal Rank Fusion (RRF k=60) │
                     │  chunk_text(512, 64)      Cross-Encoder Reranker (MiniLM)   │
                     │  (Sliding Window)         LLMService (Grounded + Citations) │
+                    │                                                             │
+                    │  GuardedToolDispatcher    BoundedAgent (4-Phase FSM)        │
+                    │  (Pydantic Validation,    (SEARCH -> INSPECT ->             │
+                    │   Timeouts, Isolation)     SUMMARIZE -> PROPOSE)            │
                     └──────────────────────────────┬──────────────────────────────┘
                                                    │
                     ┌──────────────────────────────┴──────────────────────────────┐
@@ -60,7 +65,7 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                     └─────────────────────────────────────────────────────────────┘
 ```
 
-### Retrieval & Ingestion Pipeline
+### Retrieval, Ingestion & Agent Workflows
 
 1. **Ingestion Flow:**
    ```
@@ -93,6 +98,20 @@ DevPilot is a production-grade, multi-tenant AI document intelligence platform b
                       Cross-Encoder Reranker (ms-marco-MiniLM)
                                      ▼
                       Grounded LLM Answer Synthesis + Citations [1]
+   ```
+
+3. **Bounded Agent Workflow:**
+   ```
+   POST /projects/{id}/agent/workflow ──► Validate Tenant Access
+                                                │
+                        ┌───────────────────────┴───────────────────────┐
+                        ▼                                               ▼
+               GuardedToolDispatcher                             BoundedAgent FSM
+          (Pydantic validation, timeouts,                (SEARCH ➔ INSPECT ➔ SUMMARIZE ➔ PROPOSE)
+           phase boundary firewall)                                     │
+                        │                                               ▼
+                        └───────────────────────────────────────► WorkflowReport
+                                                           (Audit logs + AgentProposal)
    ```
 
 ---
@@ -176,7 +195,7 @@ uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
 
 ### 6. Run Test Suite & Benchmark Runner
 ```bash
-# Run all 48 automated tests
+# Run all 54 automated tests
 pytest -v
 
 # Run the 50-query retrieval benchmark parameter sweep
@@ -206,6 +225,7 @@ All protected endpoints require an authenticated `X-API-Key` header:
 | `GET` | `/api/v1/jobs` | Yes | List processing jobs (filter by status) |
 | `POST` | `/api/v1/projects/{id}/search` | Yes | Multi-mode semantic search (`vector_only`, `hybrid`, `hybrid_rerank`) |
 | `POST` | `/api/v1/projects/{id}/rag` | Yes | Grounded RAG answer synthesis with citation provenance |
+| `POST` | `/api/v1/projects/{id}/agent/workflow` | Yes | Bounded 4-phase agentic research workflow (`SEARCH -> INSPECT -> SUMMARIZE -> PROPOSE`) |
 
 ---
 
