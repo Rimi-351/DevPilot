@@ -390,138 +390,313 @@ def lowest_common_ancestor(
 
 ## 3. Advanced SQL Interview Practice (DevPilot Multi-Tenant Relational Schema)
 
-### 3.1 Recursive CTEs: Hierarchical Tree & Parent-Child Traversal
-
-**Interview Scenario:**  
-*"In our multi-tenant document store, documents can be broken down into parent-child section chunks (e.g. Chapter $\rightarrow$ Section $\rightarrow$ Subsection). Write a query using a Recursive CTE that reconstructs the entire chunk hierarchy from root to leaves, calculating the depth level and generating a breadcrumb path."*
-
-```sql
--- Pattern: Recursive CTE with Depth and Breadcrumb Path String
-WITH RECURSIVE ChunkTree AS (
-    -- 1. Anchor Member: Root chunks (having no parent)
-    SELECT 
-        dc.id AS chunk_id,
-        dc.document_id,
-        dc.parent_chunk_id,
-        dc.chunk_index,
-        CAST(dc.chunk_index AS VARCHAR(255)) AS breadcrumb_path,
-        1 AS depth_level
-    FROM document_chunks dc
-    WHERE dc.parent_chunk_id IS NULL
-
-    UNION ALL
-
-    -- 2. Recursive Member: Child chunks joining with CTE on parent_chunk_id
-    SELECT 
-        child.id AS chunk_id,
-        child.document_id,
-        child.parent_chunk_id,
-        child.chunk_index,
-        CAST(parent.breadcrumb_path || ' > ' || child.chunk_index AS VARCHAR(255)),
-        parent.depth_level + 1
-    FROM document_chunks child
-    INNER JOIN ChunkTree parent 
-        ON child.parent_chunk_id = parent.chunk_id
-)
-SELECT 
-    chunk_id,
-    document_id,
-    parent_chunk_id,
-    depth_level,
-    breadcrumb_path
-FROM ChunkTree
-ORDER BY document_id, depth_level ASC, chunk_index ASC;
-```
+### Relational Schema Reference
+The DevPilot backend schema is modeled across four core tables:
+- **`projects`**: `id` (UUID, PK), `name` (VARCHAR), `tenant_id` (VARCHAR), `created_at` (TIMESTAMP WITH TIME ZONE)
+- **`documents`**: `id` (UUID, PK), `project_id` (UUID, FK `projects.id`), `filename` (VARCHAR), `file_type` (VARCHAR), `file_size_bytes` (BIGINT), `created_at` (TIMESTAMP WITH TIME ZONE)
+- **`document_chunks`**: `id` (UUID, PK), `document_id` (UUID, FK `documents.id`), `project_id` (UUID, FK `projects.id`), `chunk_index` (INT), `content` (TEXT), `created_at` (TIMESTAMP WITH TIME ZONE)
+- **`processing_jobs`**: `id` (UUID, PK), `project_id` (UUID, FK `projects.id`), `document_id` (UUID, FK `documents.id`), `job_type` (VARCHAR), `status` (VARCHAR: `PENDING`, `IN_PROGRESS`, `PROCESSING`, `COMPLETED`, `FAILED`, `CANCELLED`), `started_at` (TIMESTAMP WITH TIME ZONE), `completed_at` (TIMESTAMP WITH TIME ZONE), `created_at` (TIMESTAMP WITH TIME ZONE)
 
 ---
 
-### 3.2 Advanced Window Functions: Running Totals, Moving Averages & Lead/Lag Gaps
+### Query 1: Multi-Tenant `LEFT JOIN` with `COALESCE` Aggregation (Preventing Cross-Tenant Leakage in `ON` vs `WHERE`)
 
-#### A. Running Total Storage and Moving Average File Size per Project
-**Interview Scenario:**  
-*"Compute a cumulative running total of uploaded bytes and a 3-document rolling average size partitioned by project, sorted chronologically."*
-
-```sql
-SELECT 
-    d.id AS document_id,
-    d.project_id,
-    d.filename,
-    d.file_size_bytes,
-    d.created_at,
-    -- 1. Cumulative running total of storage within project
-    SUM(d.file_size_bytes) OVER (
-        PARTITION BY d.project_id 
-        ORDER BY d.created_at ASC, d.id ASC
-    ) AS cumulative_project_bytes,
-    
-    -- 2. Rolling 3-document moving average (preceding 2 rows + current row)
-    AVG(d.file_size_bytes) OVER (
-        PARTITION BY d.project_id 
-        ORDER BY d.created_at ASC, d.id ASC
-        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
-    ) AS rolling_3_doc_avg_bytes
-FROM documents d;
-```
-
-#### B. Idle Latency & Inter-Job Processing Gap using `LAG()`
-**Interview Scenario:**  
-*"Measure the queue wait time and idle gap between sequential background ingestion jobs for each tenant."*
+**Interview Problem Statement:**  
+*"Write a tenant-scoped reporting query that aggregates project storage consumption (document count, total file size, average file size, and total indexed chunks). Ensure projects that have 0 documents are preserved with 0 values rather than dropped, and guarantee zero cross-tenant data leakage when filtering document attributes."*
 
 ```sql
 SELECT 
-    pj.id AS job_id,
+    p.id AS project_id,
+    p.name AS project_name,
     p.tenant_id,
-    pj.status,
-    pj.created_at,
-    pj.started_at,
-    -- Time elapsed between this job creation and previous job completion
-    LAG(pj.completed_at, 1) OVER (
-        PARTITION BY p.tenant_id 
-        ORDER BY pj.created_at ASC
-    ) AS previous_job_completed_at,
-    
-    -- Processing duration in seconds
-    ROUND(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at))::numeric, 2) AS duration_seconds,
-    
-    -- Queue wait time before execution began
-    ROUND(EXTRACT(EPOCH FROM (pj.started_at - pj.created_at))::numeric, 2) AS queue_wait_seconds
-FROM processing_jobs pj
-JOIN projects p ON pj.project_id = p.id
-WHERE pj.status IN ('COMPLETED', 'FAILED');
+    p.created_at AS project_created_at,
+    COUNT(DISTINCT d.id) AS total_documents,
+    COALESCE(SUM(d.file_size_bytes), 0) AS total_storage_bytes,
+    COALESCE(ROUND(AVG(d.file_size_bytes), 2), 0.00) AS avg_document_size_bytes,
+    COALESCE(MAX(d.created_at), p.created_at) AS last_document_uploaded_at,
+    COUNT(dc.id) AS total_indexed_chunks
+FROM projects p
+-- LEFT JOIN 1: Preserve projects with 0 documents
+LEFT JOIN documents d 
+    ON p.id = d.project_id
+-- Optional right-table filters MUST reside in ON clause, NOT WHERE clause
+-- e.g., AND d.file_type IN ('pdf', 'markdown')
+-- LEFT JOIN 2: Aggregate chunk volume
+LEFT JOIN document_chunks dc 
+    ON d.id = dc.document_id
+WHERE p.tenant_id = :target_tenant_id
+GROUP BY 
+    p.id, 
+    p.name, 
+    p.tenant_id, 
+    p.created_at
+ORDER BY 
+    total_storage_bytes DESC, 
+    p.created_at DESC, 
+    p.id ASC;
 ```
+
+#### Senior Engineer Interview Analysis
+1. **The `ON` vs. `WHERE` Predicate Trap (Accidental Inner Join):**
+   - If a candidate writes `WHERE d.file_type = 'pdf'`, any project with 0 documents (or only text files) evaluates `d.file_type` to `NULL`. In SQL three-valued logic, `NULL = 'pdf'` evaluates to `UNKNOWN` (falsy), silently discarding the project!
+   - **Architectural Rule:** Conditions restricting the optional right table (`documents`) must go in the `ON` clause to preserve outer rows. The authorization boundary (`p.tenant_id = :target_tenant_id`) MUST reside in the `WHERE` clause to eliminate unowned left-table records.
+2. **`COUNT(*)` vs. `COUNT(d.id)` vs. `COUNT(DISTINCT d.id)`:**
+   - In a `LEFT JOIN` where a project has 0 documents, the join outputs a single row filled with `NULL`s for `d.*`. `COUNT(*)` counts rows and returns `1` (a hallucinated phantom document!). `COUNT(d.id)` skips `NULL`s and returns `0`.
+   - When joining both `documents` and `document_chunks` (a 1-to-many-to-many relationship), rows fan out. Using `COUNT(DISTINCT d.id)` prevents inflated document counts.
+3. **`COALESCE` for Deterministic Serialization:**
+   - `SUM(d.file_size_bytes)` over nulls yields `NULL`. In production APIs, returning `null` instead of `0` breaks frontend integer types or Pydantic strict schemas. `COALESCE(SUM(...), 0)` guarantees deterministic numeric responses.
 
 ---
 
-### 3.3 Multi-Tenant Deduplication & Top-K Ranking Queries
+### Query 2: Job Failure Rate Analytics (`GROUP BY`, `HAVING`, and Conditional `CASE WHEN`)
 
-**Interview Scenario:**  
-*"Find the top 3 largest documents uploaded for each tenant, resolving ties deterministically without skipping rank numbers."*
+**Interview Problem Statement:**  
+*"Write an analytical query to detect unstable ingestion pipelines across projects. Calculate total jobs, count of completed vs. failed jobs, failure percentage, and average processing duration of successful runs. Filter results using `HAVING` to isolate projects with at least 5 jobs and a failure rate $\ge 20\%$."*
+
+```sql
+SELECT 
+    p.tenant_id,
+    p.id AS project_id,
+    p.name AS project_name,
+    COUNT(pj.id) AS total_jobs,
+    COUNT(CASE WHEN pj.status = 'COMPLETED' THEN 1 END) AS completed_jobs,
+    COUNT(CASE WHEN pj.status = 'FAILED' THEN 1 END) AS failed_jobs,
+    COUNT(CASE WHEN pj.status IN ('PENDING', 'PROCESSING', 'IN_PROGRESS') THEN 1 END) AS active_jobs,
+    -- Prevent division-by-zero crashes via NULLIF
+    ROUND(
+        100.0 * COUNT(CASE WHEN pj.status = 'FAILED' THEN 1 END) / NULLIF(COUNT(pj.id), 0),
+        2
+    ) AS failure_rate_percentage,
+    -- Compute average execution latency for completed jobs in seconds
+    COALESCE(
+        ROUND(
+            AVG(
+                CASE 
+                    WHEN pj.status = 'COMPLETED' 
+                         AND pj.completed_at IS NOT NULL 
+                         AND pj.started_at IS NOT NULL 
+                    THEN EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at))
+                END
+            )::numeric, 
+            2
+        ), 
+        0.00
+    ) AS avg_completed_duration_seconds
+FROM projects p
+INNER JOIN processing_jobs pj 
+    ON p.id = pj.project_id
+WHERE p.tenant_id = :target_tenant_id
+GROUP BY 
+    p.tenant_id, 
+    p.id, 
+    p.name
+-- Aggregate threshold filtering in HAVING (not WHERE)
+HAVING 
+    COUNT(pj.id) >= 5 
+    AND (COUNT(CASE WHEN pj.status = 'FAILED' THEN 1 END)::numeric / COUNT(pj.id)) >= 0.20
+ORDER BY 
+    failure_rate_percentage DESC, 
+    total_jobs DESC, 
+    p.id ASC;
+```
+
+#### Senior Engineer Interview Analysis
+1. **Conditional Aggregation (`CASE WHEN` Inside Aggregate):**
+   - Traditional engineers often write multiple `COUNT` subqueries or joins per status. Conditional aggregation calculates all statuses in a single sequential or index scan over `processing_jobs`.
+   - `CASE WHEN condition THEN 1 END` defaults to `NULL` when false; because `COUNT()` ignores `NULL`, it cleanly counts only matching rows.
+2. **Defensive Arithmetic with `NULLIF`:**
+   - In PostgreSQL, dividing by `0` throws a fatal `division by zero` runtime exception. `NULLIF(COUNT(pj.id), 0)` transforms `0` to `NULL`. Since `X / NULL = NULL`, the query never crashes.
+3. **`WHERE` vs. `HAVING` Pipeline Execution Order:**
+   - `WHERE` filters rows *before* aggregation (utilizing composite index `ix_projects_tenant_created`).
+   - `HAVING` filters aggregated buckets *after* grouping. Attempting to place `COUNT(pj.id) >= 5` in `WHERE` causes a SQL syntax error because aggregate values do not yet exist.
+
+---
+
+### Query 3: Top-N Slowest or Largest Documents per Project (`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`)
+
+**Interview Problem Statement:**  
+*"Find the top 3 largest documents uploaded for each project within a tenant, resolving ties deterministically to ensure reproducible pagination and stable reporting. Also report the ingestion duration for each document."*
 
 ```sql
 WITH RankedDocuments AS (
     SELECT 
         p.tenant_id,
+        p.name AS project_name,
+        d.project_id,
         d.id AS document_id,
         d.filename,
+        d.file_type,
         d.file_size_bytes,
         d.created_at,
-        -- DENSE_RANK ensures contiguous rank numbers (1, 2, 2, 3...)
-        DENSE_RANK() OVER (
-            PARTITION BY p.tenant_id 
-            ORDER BY d.file_size_bytes DESC, d.created_at ASC, d.id ASC
-        ) AS rank_num
+        -- Deterministic ranking within each project partition
+        ROW_NUMBER() OVER (
+            PARTITION BY d.project_id 
+            ORDER BY d.file_size_bytes DESC, d.created_at DESC, d.id ASC
+        ) AS size_rank,
+        -- Ingestion duration in seconds from completed processing jobs
+        ROUND(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at))::numeric, 2) AS ingestion_duration_seconds
     FROM documents d
-    JOIN projects p ON d.project_id = p.id
+    INNER JOIN projects p 
+        ON d.project_id = p.id
+    LEFT JOIN processing_jobs pj 
+        ON d.id = pj.document_id 
+       AND pj.status = 'COMPLETED'
+    WHERE p.tenant_id = :target_tenant_id
 )
 SELECT 
-    tenant_id,
-    rank_num,
+    project_id,
+    project_name,
+    size_rank,
     document_id,
     filename,
-    file_size_bytes
+    file_type,
+    file_size_bytes,
+    ingestion_duration_seconds,
+    created_at
 FROM RankedDocuments
-WHERE rank_num <= 3
-ORDER BY tenant_id, rank_num ASC;
+WHERE size_rank <= 3
+ORDER BY 
+    project_id ASC, 
+    size_rank ASC;
+```
+
+#### Senior Engineer Interview Analysis
+1. **`ROW_NUMBER()` vs. `RANK()` vs. `DENSE_RANK()`:**
+   - `ROW_NUMBER()`: Always produces strict sequential integers (`1, 2, 3, 4`). When paired with deterministic tie-breakers (`ORDER BY file_size_bytes DESC, created_at DESC, id ASC`), it guarantees that the exact same documents appear in the Top-N across repeated calls.
+   - `RANK()`: Ties receive the same rank and skip subsequent numbers (`1, 2, 2, 4`). This can inadvertently return fewer or more than $N$ items.
+   - `DENSE_RANK()`: Ties receive the same rank without skipping (`1, 2, 2, 3`).
+2. **Why a CTE / Subquery is Required:**
+   - In the SQL logical evaluation lifecycle (`FROM` $\rightarrow$ `WHERE` $\rightarrow$ `GROUP BY` $\rightarrow$ `HAVING` $\rightarrow$ `SELECT` / Window Functions $\rightarrow$ `ORDER BY`), window functions are computed in the `SELECT` phase.
+   - Therefore, evaluating `WHERE ROW_NUMBER() OVER (...) <= 3` in the same scope is invalid syntax. The Common Table Expression (CTE) materializes or pipelines the windowed computation so the outer query can filter on `size_rank`.
+3. **Index Optimization:**
+   - The partition and ordering map cleanly to our composite index `(project_id, created_at)` or an index on `(project_id, file_size_bytes DESC)`.
+
+---
+
+### Query 4: Sequential Ingestion Duration Delta & Running Byte Totals (`LAG()` and Window Frames)
+
+**Interview Problem Statement:**  
+*"Produce a chronological audit log of completed ingestion jobs for each project. For each job, calculate: (1) execution duration, (2) latency delta from the immediately preceding job using `LAG()`, and (3) cumulative running total of bytes processed across documents using explicit window frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`."*
+
+```sql
+SELECT 
+    p.tenant_id,
+    pj.project_id,
+    pj.id AS job_id,
+    pj.job_type,
+    pj.status,
+    pj.started_at,
+    pj.completed_at,
+    d.id AS document_id,
+    d.filename,
+    d.file_size_bytes,
+    -- 1. Current job duration in seconds
+    ROUND(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at))::numeric, 2) AS duration_seconds,
+    -- 2. Prior job duration via LAG() partitioned by project
+    ROUND(
+        LAG(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at)), 1) OVER (
+            PARTITION BY pj.project_id 
+            ORDER BY pj.completed_at ASC, pj.id ASC
+        )::numeric, 
+        2
+    ) AS prev_job_duration_seconds,
+    -- Duration delta compared to preceding job (positive = slower, negative = faster)
+    ROUND(
+        (
+            EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at)) - 
+            LAG(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at)), 1) OVER (
+                PARTITION BY pj.project_id 
+                ORDER BY pj.completed_at ASC, pj.id ASC
+            )
+        )::numeric,
+        2
+    ) AS duration_delta_seconds,
+    -- 3. Cumulative running total of document bytes processed up to the current job
+    SUM(COALESCE(d.file_size_bytes, 0)) OVER (
+        PARTITION BY pj.project_id 
+        ORDER BY pj.completed_at ASC, pj.id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_processed_bytes,
+    -- Inter-job idle gap (time elapsed between previous job completion and current job start)
+    ROUND(
+        EXTRACT(
+            EPOCH FROM (
+                pj.started_at - LAG(pj.completed_at, 1) OVER (
+                    PARTITION BY pj.project_id 
+                    ORDER BY pj.completed_at ASC, pj.id ASC
+                )
+            )
+        )::numeric,
+        2
+    ) AS idle_gap_seconds
+FROM processing_jobs pj
+INNER JOIN projects p 
+    ON pj.project_id = p.id
+LEFT JOIN documents d 
+    ON pj.document_id = d.id
+WHERE 
+    p.tenant_id = :target_tenant_id
+    AND pj.status = 'COMPLETED'
+    AND pj.started_at IS NOT NULL 
+    AND pj.completed_at IS NOT NULL
+ORDER BY 
+    pj.project_id, 
+    pj.completed_at ASC, 
+    pj.id ASC;
+```
+
+#### Senior Engineer Interview Analysis
+1. **`LAG(expression, offset, default)` Mechanics:**
+   - `LAG(..., 1)` peeks at the row immediately prior within the `(PARTITION BY pj.project_id ORDER BY pj.completed_at ASC)` window.
+   - For the initial row in each partition, `LAG()` returns `NULL`. Subtracting `NULL` produces `NULL`, which accurately indicates that no prior delta exists for the first run.
+2. **`ROWS` vs. `RANGE` Window Framing Pitfall:**
+   - In SQL, omitting the frame clause when `ORDER BY` is present defaults to:
+     `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+   - **The Bug:** `RANGE` treats duplicate `completed_at` timestamps as value peers. If two jobs complete at the exact same second, `RANGE` lumps them together and adds both file sizes simultaneously into both rows!
+   - **The Fix:** Explicitly specifying `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` instructs the engine to process physical rows one by one.
+   - **Performance:** `ROWS` avoids peer lookahead scans in PostgreSQL, making it substantially faster than `RANGE`.
+
+---
+
+### Query 5 (Bonus): Recursive CTE for Hierarchical Section & Chunk Traversal
+
+**Interview Problem Statement:**  
+*"In our multi-tenant document store, documents can be broken down into parent-child section chunks (e.g. Chapter $\rightarrow$ Section $\rightarrow$ Subsection). Write a query using a Recursive CTE that reconstructs the entire chunk hierarchy from root to leaves, calculating depth level and generating a breadcrumb path."*
+
+```sql
+WITH RECURSIVE ChunkTree AS (
+    -- 1. Anchor Member: Root chunks (having no parent)
+    SELECT 
+        dc.id AS chunk_id,
+        dc.document_id,
+        dc.chunk_index,
+        CAST(dc.chunk_index AS VARCHAR(255)) AS breadcrumb_path,
+        1 AS depth_level
+    FROM document_chunks dc
+    WHERE dc.chunk_index = 0
+
+    UNION ALL
+
+    -- 2. Recursive Member: Sequential/hierarchical child chunks
+    SELECT 
+        child.id AS chunk_id,
+        child.document_id,
+        child.chunk_index,
+        CAST(parent.breadcrumb_path || ' > ' || child.chunk_index AS VARCHAR(255)),
+        parent.depth_level + 1
+    FROM document_chunks child
+    INNER JOIN ChunkTree parent 
+        ON child.document_id = parent.document_id 
+       AND child.chunk_index = parent.chunk_index + 1
+    WHERE parent.depth_level < 20  -- Recursion depth guard against cycles
+)
+SELECT 
+    chunk_id,
+    document_id,
+    depth_level,
+    breadcrumb_path
+FROM ChunkTree
+ORDER BY document_id, depth_level ASC;
 ```
 
 ---
