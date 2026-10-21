@@ -1,7 +1,7 @@
 # DevPilot Core CS & Backend Fundamentals Review Guide
 ## Technical Interview Revision: DSA, Database Transactions, SQL Optimization & RESTful Architecture
 
-**Document Version:** 1.2.0  
+**Document Version:** 1.3.0  
 **Target Roles:** Senior Backend Engineer, Distributed Systems Engineer, AI Platform Architect  
 **Purpose:** Rapid technical interview revision mapping theoretical computer science principles directly to production code patterns inside DevPilot.
 
@@ -26,10 +26,11 @@
    - [3.3 N+1 Query Mitigation in ORM Architectures (`selectinload` vs `joinedload`)](#33-n1-query-mitigation-in-orm-architectures-selectinload-vs-joinedload)
    - [3.4 Keyset / Cursor vs. Offset Pagination Trade-offs & Drift Prevention](#34-keyset--cursor-vs-offset-pagination-trade-offs--drift-prevention)
    - [3.5 Analytical Window Functions (`DENSE_RANK()`) & Recursive CTEs](#35-analytical-window-functions-denserank--recursive-ctes)
-5. [Section 4: HTTP Semantics & RESTful API Architecture](#section-4-http-semantics--restful-api-architecture)
-   - [4.1 HTTP Method Idempotency & Safety](#41-http-method-idempotency--safety)
-   - [4.2 Precise HTTP Status Code Taxonomy](#42-precise-http-status-code-taxonomy)
-   - [4.3 Two-Tier Security & BOLA Prevention (OWASP API1:2023)](#43-two-tier-security--bola-prevention-owasp-api12023)
+5. [Section 4: HTTP Protocol Semantics & RESTful API Design](#section-4-http-protocol-semantics--restful-api-design)
+   - [4.1 HTTP Method Idempotency & Safety (`GET`, `PUT`, `DELETE` vs `POST` and `PATCH`)](#41-http-method-idempotency--safety-get-put-delete-vs-post-and-patch)
+   - [4.2 Exact Status Code Semantics Enforced in DevPilot (`200`, `201`, `202`, `401`, `403`, `404`, `409`, `422`, `503`)](#42-exact-status-code-semantics-enforced-in-devpilot-200-201-202-401-403-404-409-422-503)
+   - [4.3 Statelessness, CORS Architecture, and Header-Driven Tenant Isolation (`X-API-Key`)](#43-statelessness-cors-architecture-and-header-driven-tenant-isolation-x-api-key)
+   - [4.4 Two-Tier Security & BOLA Prevention (OWASP API1:2023)](#44-two-tier-security--bola-prevention-owasp-api12023)
 6. [Section 5: High-Yield Interview Revision Cheatsheet](#section-5-high-yield-interview-revision-cheatsheet)
 
 ---
@@ -49,6 +50,7 @@ B-Tree Leftmost Prefix Rule       ──►  Composite indexes (tenant_id, creat
 ACID Rollback Isolation           ──►  await session.rollback() preventing partial ghost chunks
 Keyset vs Offset Pagination       ──►  Bounded deterministic pagination with secondary tie-breaking
 HTTP Idempotency & Status Codes   ──►  Deterministic REST APIs, 401 perimeter, 403 BOLA defense
+Statelessness & Custom Headers    ──►  Header-driven X-API-Key tenant boundary without session cookies
 ```
 
 ---
@@ -547,61 +549,160 @@ SELECT id, title, path, depth FROM DocumentBreadcrumbs ORDER BY depth DESC;
 
 ---
 
-## Section 4: HTTP Semantics & RESTful API Architecture
+## Section 4: HTTP Protocol Semantics & RESTful API Design
 
-### 4.1 HTTP Method Idempotency & Safety
+### 4.1 HTTP Method Idempotency & Safety (`GET`, `PUT`, `DELETE` vs `POST` and `PATCH`)
 
-- **Safe Method:** Does not alter server state (Read-only).
-- **Idempotent Method:** Making $N$ identical requests produces the exact same server state as making 1 request ($f(f(x)) = f(x)$).
+In RESTful architecture (RFC 7231 & RFC 5789), HTTP methods are classified by their **safety** and **idempotency**:
 
-| Method | Safe? | Idempotent? | DevPilot Endpoint Example | RFC Semantics |
+- **Safe Methods ($f(x) \implies x$):** The request produces zero state-altering side effects on the server. The client is inspecting state, not mutating it.
+- **Idempotent Methods ($f(f(x)) = f(x)$):** Making $N$ identical requests produces the exact same server resource state as making a single request. If network drops occur, clients can safely retry without creating duplicate state or corrupted records.
+
+```
+Method Idempotency Visualized:
+
+POST /api/v1/projects  (Non-Idempotent)
+Request 1 ──► Project "Alpha" Created (ID: 001)
+Request 2 ──► Project "Alpha" Created (ID: 002) ⚠️ Duplication!
+
+PUT /api/v1/documents/1  (Idempotent)
+Request 1 ──► Document 1 content replaced with "Hello"
+Request 2 ──► Document 1 content replaced with "Hello" (Identical state)
+
+DELETE /api/v1/projects/1  (Idempotent)
+Request 1 ──► Project 1 deleted (HTTP 204 / 200)
+Request 2 ──► Project 1 already gone (HTTP 404 / 204; Final state: Project is absent)
+```
+
+| HTTP Method | Safe? | Idempotent? | DevPilot Endpoint Example | Production RFC Semantics |
 | :---: | :---: | :---: | :--- | :--- |
-| `GET` | **Yes** | **Yes** | `GET /api/v1/projects/{id}` | Cacheable, zero side-effects |
-| `POST` | No | No | `POST /api/v1/projects` | Creates new resource; returns `201 Created` |
-| `PATCH` | No | No | `PATCH /api/v1/projects/{id}` | Partial update of entity fields |
-| `PUT` | No | **Yes** | `PUT /api/v1/documents/{id}` | Complete replacement of entity |
-| `DELETE` | No | **Yes** | `DELETE /api/v1/projects/{id}` | Deletes entity; deleting twice still leaves entity gone |
+| **`GET`** | **Yes** | **Yes** | `GET /api/v1/projects/{id}` | Read-only; cacheable; safe to pre-fetch. |
+| **`HEAD`** | **Yes** | **Yes** | `HEAD /api/v1/documents/{id}` | Retrieves HTTP headers without response body. |
+| **`PUT`** | No | **Yes** | `PUT /api/v1/documents/{id}` | Complete resource replacement. Calling $N$ times leaves identical state. |
+| **`DELETE`**| No | **Yes** | `DELETE /api/v1/projects/{id}` | Resource removal. Calling $N$ times results in the resource being absent. |
+| **`POST`** | No | **No** | `POST /api/v1/projects` | Creates new resource or triggers processing. Calling twice creates two resources. |
+| **`PATCH`**| No | Conditional | `PATCH /api/v1/projects/{id}` | Partial update. RFC 5789 defines PATCH as non-idempotent by default, but patching static fields (`{"name": "NewName"}`) is idempotent. |
 
 ---
 
-### 4.2 Precise HTTP Status Code Taxonomy
+### 4.2 Exact Status Code Semantics Enforced in DevPilot (`200`, `201`, `202`, `401`, `403`, `404`, `409`, `422`, `503`)
 
-DevPilot maps application domain exceptions to precise HTTP status codes:
+DevPilot enforces a strict semantic mapping between internal domain exceptions and RFC-compliant HTTP status codes:
+
+```
+                          Client Request
+                                │
+                 Is X-API-Key present & valid?
+                                │
+                ┌───────────────┴───────────────┐
+               NO                               YES
+                │                               │
+        HTTP 401 Unauthorized         Does target project exist?
+                                                │
+                                ┌───────────────┴───────────────┐
+                               NO                               YES
+                                │                               │
+                        HTTP 404 Not Found             Does caller own project?
+                                                                │
+                                                ┌───────────────┴───────────────┐
+                                               NO                               YES
+                                                │                               │
+                                        HTTP 403 Forbidden             Is payload valid JSON?
+                                                                                │
+                                                                ┌───────────────┴───────────────┐
+                                                               NO                               YES
+                                                                │                               │
+                                                        HTTP 422 Unprocessable      Does hash collision exist?
+                                                                                                │
+                                                                                ┌───────────────┴───────────────┐
+                                                                               YES                              NO
+                                                                                │                               │
+                                                                        HTTP 409 Conflict            Execute Action (200/201/202)
+```
 
 | Status Code | RFC Meaning | DevPilot Trigger Scenario | Code Reference |
 | :---: | :--- | :--- | :--- |
-| **`200 OK`** | Standard successful response | Successful retrieval, search, RAG synthesis | `api/v1/endpoints/search.py` |
-| **`201 Created`** | New entity created | Project created, document record provisioned | `api/v1/endpoints/projects.py` |
-| **`400 Bad Request`** | Malformed request syntax | Slicing bounds violated (`skip < 0`) | `src/main.py:value_error_handler` |
-| **`401 Unauthorized`** | Missing/invalid authentication | Missing or blank `X-API-Key` header | `src/core/security.py:get_current_tenant` |
-| **`403 Forbidden`** | Authenticated, but not authorized | Caller tenant mismatch (`owner != current_api_key`) or Demo write | `src/core/security.py:verify_project_tenant_access` |
-| **`404 Not Found`** | Resource does not exist | `project_id` or `document_id` does not exist | `src/services/job.py` |
-| **`409 Conflict`** | Resource state collision | Duplicate document SHA-256 upload | `src/main.py:conflict_error_handler` |
-| **`422 Unprocessable`** | Schema validation failure | Missing required JSON body field (Pydantic) | FastAPI default exception handler |
-| **`503 Service Unavail`**| Upstream service outage | LLM API provider timeout or network drop | `src/services/llm.py` |
+| **`200 OK`** | Action completed successfully | Synchronous hybrid search, RAG answer synthesis, document retrieval | `src/api/v1/endpoints/search.py` |
+| **`201 Created`** | New entity provisioned | Synchronous project entity creation with generated UUID | `src/api/v1/endpoints/projects.py` |
+| **`202 Accepted`** | Asynchronous task enqueued | Document upload enqueuing background ingestion job (`ProcessingJob` returned in `PENDING` state) | `src/api/v1/endpoints/documents.py` |
+| **`400 Bad Request`** | Malformed query parameters | Slicing bounds violated (`skip < 0` or negative page limits) | `src/main.py:value_error_handler` |
+| **`401 Unauthorized`** | Missing/invalid authentication | Missing, blank, or malformed `X-API-Key` header at perimeter | `src/core/security.py:get_current_tenant` |
+| **`403 Forbidden`** | Authenticated, but not authorized | Cross-tenant access attempt (`owner != current_api_key`) or Demo Mode write mutation | `src/core/security.py:verify_project_tenant_access` |
+| **`404 Not Found`** | Resource does not exist | `project_id`, `document_id`, or `job_id` UUID not found in database | `src/services/job.py` |
+| **`409 Conflict`** | Resource state collision | Uploading duplicate document with identical SHA-256 hash | `src/main.py:conflict_error_handler` |
+| **`422 Unprocessable`** | Schema validation failure | Pydantic v2 validation error (wrong field types, missing body keys) | FastAPI default validation handler |
+| **`503 Service Unavail`**| Upstream service outage | Upstream LLM provider timeout, circuit-breaker open, or network drop | `src/services/llm.py` |
 
 ---
 
-### 4.3 Two-Tier Security & BOLA Prevention (OWASP API1:2023)
+### 4.3 Statelessness, CORS Architecture, and Header-Driven Tenant Isolation (`X-API-Key`)
 
-#### The Vulnerability (BOLA / IDOR):
-Broken Object Level Authorization occurs when an API endpoint relies on user-supplied IDs (e.g. `/projects/{uuid}`) without verifying whether the authenticated user owns that specific object.
+#### 1. REST Statelessness (Roy Fielding's Dissertation):
+- **Core Principle:** Every request from a client to a server must contain **all** context and authentication information required to process the request. No session state is ever stored in server RAM.
+- **Distributed Benefits:**
+  - Any application server replica behind a load balancer (Nginx/HAProxy) can handle any incoming request.
+  - Zero session-affinity ("sticky session") requirements.
+  - Painless zero-downtime rolling deployments and horizontal autoscaling.
 
-#### DevPilot Two-Tier Defense Model:
+#### 2. Cross-Origin Resource Sharing (CORS):
+Browsers enforce the **Same-Origin Policy (SOP)**, blocking frontend web apps hosted on `https://app.devpilot.io` from making fetch requests to `https://api.devpilot.io` unless explicit CORS headers are returned.
+
+- **Preflight Request (`OPTIONS`):**
+  When a browser sends custom headers (like `X-API-Key`) or complex methods (`PATCH`/`DELETE`), it first issues an `OPTIONS` preflight request:
+  ```http
+  OPTIONS /api/v1/projects HTTP/1.1
+  Host: api.devpilot.io
+  Origin: https://app.devpilot.io
+  Access-Control-Request-Method: POST
+  Access-Control-Request-Headers: X-API-Key, Content-Type
+  ```
+- **DevPilot CORS Configuration (`src/main.py`):**
+  ```python
+  from fastapi.middleware.cors import CORSMiddleware
+
+  app.add_middleware(
+      CORSMiddleware,
+      allow_origins=["*"],  # Configurable via settings.CORS_ORIGINS in production
+      allow_credentials=True,
+      allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      allow_headers=["X-API-Key", "Content-Type", "Authorization"],
+  )
+  ```
+  The API responds with `Access-Control-Allow-Origin: https://app.devpilot.io` and `Access-Control-Allow-Headers: X-API-Key, Content-Type`, authorizing the client to execute the real call.
+
+#### 3. Why Header-Driven Authentication (`X-API-Key`) is Superior:
+1. **Query Parameters Leak (`?api_key=secret`):** Query parameters are written in plain text to web server access logs (Nginx/Caddy), proxy caches, browser histories, and `Referer` headers when clicking external links.
+2. **URL Path Pollution (`/api/v1/tenants/{key}/projects`):** Embedding tenant keys into paths violates REST resource-modeling conventions and complicates route caching.
+3. **Perimeter Fast-Fail:** Passing `X-API-Key` in HTTP headers allows FastAPI dependencies (`Security(api_key_header)`) to validate credentials at the immediate gateway layer, rejecting invalid callers with HTTP 401 **before allocating database connections or parsing large request bodies**.
+
+---
+
+### 4.4 Two-Tier Security & BOLA Prevention (OWASP API1:2023)
+
+#### The Vulnerability (Broken Object Level Authorization / IDOR):
+BOLA occurs when an application exposes object identifiers (e.g., `/api/v1/projects/{uuid}`) and validates *that* the caller has an account, but fails to verify *that the caller owns that specific record*.
+
+#### DevPilot Two-Tier Defense Implementation (`src/core/security.py`):
+```python
+# Tier 1: Gateway Perimeter Authentication
+async def get_current_tenant(api_key: Optional[str] = Security(api_key_header)) -> str:
+    if not api_key or not api_key.strip():
+        raise HTTPException(status_code=401, detail="Missing or invalid API key.")
+    return api_key.strip()
+
+# Tier 2: Entity-Level Ownership Verification
+def verify_project_tenant_access(project: Optional[Project], current_api_key: str) -> None:
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    owner = project.tenant_id or project.owner_api_key
+    # Enforce strict owner match; allow read-only demo inspection if configured
+    if owner and owner != current_api_key:
+        if is_demo_api_key(current_api_key) and is_demo_workspace(project):
+            return
+        raise HTTPException(status_code=403, detail="Forbidden: Access denied to project.")
 ```
-Request: GET /api/v1/projects/550e8400-e29b-41d4-a716-446655440000
-Header : X-API-Key: tenant_b_key
-
-Tier 1: Gateway Perimeter Authentication
-├── Validates X-API-Key is present and well-formed.
-└── Sets request state: authenticated_tenant = 'tenant_b_key'.
-    (If missing -> HTTP 401 Unauthorized)
-
-Tier 2: Object-Level Authorization
-├── Fetches project entity from database.
-├── Compares: project.tenant_id ('tenant_a_key') == authenticated_tenant ('tenant_b_key').
-└── Mismatch detected! -> HTTP 403 Forbidden. Execution HALTS.
-```
+- **Architectural Guarantee:** Tier 1 establishes caller identity. Tier 2 verifies entity possession. An attacker guessing or enumerating UUIDs cannot access another tenant's project records.
 
 ---
 
@@ -621,3 +722,7 @@ Tier 2: Object-Level Authorization
    Wrap database chunk staging in `try...except` and immediately execute `await session.rollback()` to flush the SQLAlchemy identity map before committing the `FAILED` state.
 6. **What is the difference between HTTP 401 and HTTP 403?**  
    `401 Unauthorized` means *"I do not know who you are (missing/invalid credentials)"*. `403 Forbidden` means *"I know who you are, but you do not have permission to access this object"*.
+7. **Why is `DELETE` idempotent while `POST` is not?**  
+   Deleting a resource multiple times leaves the server in the exact same state (the resource is absent); calling `POST` multiple times creates multiple distinct entities or collisions.
+8. **Why is `202 Accepted` used for document upload?**  
+   Document extraction, sliding-window chunking, and vector embedding are long-running asynchronous background operations. Returning `202 Accepted` acknowledges receipt and returns a pollable `job_id` without blocking the HTTP request thread.
