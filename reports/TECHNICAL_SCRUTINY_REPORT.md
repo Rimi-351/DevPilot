@@ -166,9 +166,9 @@ Evaluated across 50 technical queries in [`benchmarks/gold_standard_50.jsonl`](f
 
 ---
 
-## 4. Failure Case Analysis & Latent Defect Mitigations
+## 4. Failure Cases & Defect Mitigations
 
-During Step 1 Technical Scrutiny, all latent edge-case bugs and failure modes were systematically audited and resolved:
+During Step 1 Technical Scrutiny, all latent edge-case bugs, boundary overflows, and failure modes across retrieval, RAG, and ingestion were systematically audited and resolved:
 
 ```
 ┌──────────────────────────────────────┬──────────────────────────────────────┬──────────────────────────────────────┐
@@ -196,30 +196,76 @@ During Step 1 Technical Scrutiny, all latent edge-case bugs and failure modes we
 └──────────────────────────────────────┴──────────────────────────────────────┴──────────────────────────────────────┘
 ```
 
+### 4.1 Zero-Token BM25 Division-by-Zero Remediation
+- **The Defect:** In standard `rank_bm25.BM25Okapi`, the IDF calculation executes `self.average_idf = idf_sum / len(self.idf)`. If a candidate document corpus consists solely of emojis (`🚀🔥🎉`), punctuation symbols (`??? !@#`), or un-tokenizable characters, the extracted token set is completely empty (`len(self.idf) == 0`), crashing the worker process with an uncaught `ZeroDivisionError: division by zero`.
+- **The Remediation:** In [`src/services/retrieval/hybrid.py`](file:///e:/Devpilot/src/services/retrieval/hybrid.py), `get_or_create_bm25_index` inspects `tokenized_corpus` before instantiating `BM25Okapi`. If `not any(len(toks) > 0 for toks in tokenized_corpus)`, it caches `(corpus_len, None, corpus_chunks)` and immediately short-circuits. `bm25_search` intercepts this condition and assigns a baseline score of `0.0` to all chunks, entirely bypassing the division by zero.
+
+### 4.2 Negative Slicing Bounds & Retrieval Limits
+- **The Defect:** In Python, list slicing with negative integers (e.g. `items[:top_k]` where `top_k = -1`) slices off the final element rather than returning an empty list, returning $N-1$ candidate records. If a caller supplied a non-positive or negative integer to `retrieve_chunks`, `bm25_search`, `reciprocal_rank_fusion`, or `rerank`, the functions returned erroneous subsets instead of empty candidate sets.
+- **The Remediation:** Strict boundary guards (`if top_k <= 0: return []` and `if top_n <= 0: return []`) were placed at the entry points of all retrieval routines in [`src/services/retrieval/pipeline.py`](file:///e:/Devpilot/src/services/retrieval/pipeline.py), [`src/services/retrieval/hybrid.py`](file:///e:/Devpilot/src/services/retrieval/hybrid.py), and [`src/services/retrieval/reranker.py`](file:///e:/Devpilot/src/services/retrieval/reranker.py). Candidate pool limits are further clamped with `max(1, chunk_limit)`.
+
+### 4.3 Handling Empty and Whitespace-Only Queries
+- **The Defect:** Queries containing only spaces, tabs, or newlines (`"   \n\t"`) bypassed length checks that did not strip whitespace. In vector search, this caused FastEmbed to vectorize empty strings, generating non-zero vectors and performing expensive cosine similarity sweeps over all chunks. In RAG synthesis, it passed blank prompts to LLM endpoints.
+- **The Remediation:** Fast-path query guards (`if not query or not query.strip(): return []`) were introduced in `retrieve_chunks`, `search_project_documents`, and `generate_grounded_answer`. For RAG endpoints, empty queries immediately return the polite `NEGATIVE_RESPONSE` with `chunks_evaluated = 0`, saving database roundtrips, embedding matrix multiplications, and LLM token consumption.
+
+### 4.4 Out-of-Context Hallucinations & Malformed Provenance Offsets
+- **The Defect:** When testing edge-case chunks or legacy documents where `start_offset`, `end_offset`, or `filename` was `None`, constructing Pydantic response models (`Citation`, `SearchChunkResult`) raised strict Pydantic validation errors, bubbling up as unhandled HTTP 500 server errors. Furthermore, generative models occasionally hallucinated bracket tags referencing non-existent context indices (e.g., generating `[99]` or citing unretrieved files).
+- **The Remediation:** In [`src/services/rag.py`](file:///e:/Devpilot/src/services/rag.py) and [`src/api/v1/endpoints/search.py`](file:///e:/Devpilot/src/api/v1/endpoints/search.py), offset resolution applies safe coalesce fallbacks (`start_offset or 0`, `end_offset or 0`, `filename or 'unknown'`). In [`src/core/guardrails.py`](file:///e:/Devpilot/src/core/guardrails.py), `CitationVerificationService` cross-checks every bracketed citation against retrieved context chunk IDs, converts indices inside `try...except (ValueError, OverflowError)`, strips all ungrounded markers, and marks responses with `is_grounded = False` if unsupported claims exceed 20%.
+
+### 4.5 Upstream Network Outages & 503 Fallbacks
+- **The Defect:** Transient connection drops, rate-limiting HTTP 429s, or cloud provider HTTP 503 maintenance outages during LLM synthesis could crash active user requests.
+- **The Remediation:** [`src/services/llm.py`](file:///e:/Devpilot/src/services/llm.py) wraps upstream calls in an asynchronous retry harness with exponential backoff and jitter. If retries are exhausted, the service gracefully degrades to a polite rejection response rather than dropping the client connection.
+
 ---
 
-## 5. Security Architecture & Tenant Isolation Guarantees
+## 5. Security & Multi-Tenant Guardrails
 
-### 5.1 Two-Tier Authentication & Object-Level Authorization
-Security in DevPilot is enforced through a strict defense-in-depth model:
-- **Tier 1 (Header Authentication):** Every authenticated request requires the `X-API-Key` header. Missing, empty, or whitespace keys trigger an immediate `HTTP 401 Unauthorized` response with a `WWW-Authenticate: X-API-Key` challenge.
-- **Tier 2 (Object-Level Authorization):** After resolving the caller's tenant identifier, the database entity (e.g., `Project`, `Document`, `ProcessingJob`) is checked against the caller's tenant ID via `verify_project_tenant_access`. If `project.tenant_id != caller_tenant_id`, the API returns `HTTP 403 Forbidden`. If the project does not exist, it returns `HTTP 404 Not Found`.
+### 5.1 Object-Level Authorization & Entity Ownership Verification
+DevPilot enforces comprehensive object-level access control (BOLA/IDOR protection) across all six REST routers:
+- Every resource lookup (Projects, Documents, Chunks, ProcessingJobs) enforces ownership checks against the authenticated caller's tenant identifier.
+- In [`src/core/security.py`](file:///e:/Devpilot/src/core/security.py), `verify_project_tenant_access(project, current_api_key)` verifies that `project.tenant_id == current_api_key`. If the project is claimed by another tenant, an immediate `HTTP 403 Forbidden` exception is raised with diagnostic logging.
+- Null-Safe Guard: If `verify_project_tenant_access(None, ...)` is invoked, it cleanly raises `HTTP 404 Not Found` rather than encountering an unhandled `AttributeError`.
 
-### 5.2 Read-Only Demo Mode
-For public evaluation and portfolio inspection, DevPilot features an isolated demo mode:
-- **Demo API Key:** Callers presenting `X-API-Key: demo-readonly-key` (or keys configured via `DEMO_API_KEY`) are granted access to read and inference endpoints (`GET`, search, RAG, workflow inspection).
-- **Write Mutation Firewall:** The middleware [`src/main.py`](file:///e:/Devpilot/src/main.py) blocks all `POST`, `PATCH`, `PUT`, and `DELETE` requests with `HTTP 403 Forbidden`:
+```
+Client Request (X-API-Key: Tenant B)
+  │
+  ▼
+[FastAPI Dependency: get_current_tenant] ──► Validates header presence (or HTTP 401)
+  │
+  ▼
+[Database Entity Lookup: Project A] ─────► Fetches entity (or HTTP 404)
+  │
+  ▼
+[verify_project_tenant_access]
+  ├── If project.tenant_id == tenant_id   ──► PROCEED (HTTP 200/201)
+  └── If project.tenant_id != tenant_id   ──► ABORT with HTTP 403 Forbidden
+```
+
+### 5.2 X-API-Key Tenant Isolation & Authentication Pipeline
+- **Header Enforcement:** All protected routes inject `get_current_api_key`, extracting the API key from the `X-API-Key` HTTP header. Missing, null, or whitespace-only keys are rejected with `HTTP 401 Unauthorized` and `WWW-Authenticate: X-API-Key`.
+- **Tenant Scope Binding:** When creating new projects or uploading documents, the system automatically binds the entity's `tenant_id` to the authenticated key, preventing callers from impersonating or provisioning resources under foreign tenant namespaces.
+
+### 5.3 Read-Only Demo Sandbox Enforcement
+To empower external evaluators, reviewers, and automated CI runners to test DevPilot without manual account provisioning or state corruption risks, DevPilot includes a dedicated Read-Only Demo Sandbox:
+- **Demo Key Detection:** Callers submitting `X-API-Key: demo-readonly-key` (or keys matching `DEMO_API_KEY`) are identified via `is_demo_api_key`.
+- **Mutation Shield Middleware:** In [`src/main.py`](file:///e:/Devpilot/src/main.py), an HTTP middleware intercepts all requests from demo keys. Any write mutation (`POST`, `PATCH`, `PUT`, `DELETE`) attempting to alter system state is blocked with `HTTP 403 Forbidden`:
   > *"Demo Mode: Write operations (create, update, delete) are disabled for demo credentials. Read-only access is granted for search, RAG, and document inspection."*
-- **Tenant Containment:** Demo credentials are isolated to the `"DevPilot Evaluation Workspace"` project and cannot access private tenant workspaces.
+- **Allowed Safe Paths:** Demo callers are permitted to execute read operations (`GET`) and safe inference routines (`POST /{id}/search`, `POST /{id}/rag`, `POST /{id}/agent/workflow`).
+- **Sandbox Project Containment:** In `verify_project_tenant_access`, demo credentials are strictly confined to the pre-seeded `"DevPilot Evaluation Workspace"`, preventing access to private tenant data.
 
-### 5.3 Anti-Hallucination Guardrails & Negative Query Guarantee
-In [`src/core/guardrails.py`](file:///e:/Devpilot/src/core/guardrails.py), the `CitationVerificationService` inspects all generated LLM responses:
-1. **Bracket Citation Validation:** Scans answers for citations (e.g., `[1]`, `[1, 2]`, `[chunk: UUID]`). Each reference is checked against the retrieved chunks passed into the prompt.
-2. **Invalid Citation Stripping:** Hallucinated markers (e.g., `[99]`, unretrieved documents) are stripped from the cleaned answer text.
-3. **Telemetric Grounding Status:** If invalid citations are stripped or the unsupported claims rate exceeds 20%, `is_grounded` is set to `False`.
-4. **Out-of-Scope Negative Query Guarantee:** Questions unrelated to the indexed documents (e.g., *"What is the secret recipe of Coca-Cola?"*) are guaranteed to trigger the standard negative rejection:
-   > *"I do not have enough information in the provided documents to answer this question."*
-   The guardrail evaluates these rejections with **0 citations**, **0.0% unsupported claims rate**, and **is_grounded = True**.
+### 5.4 Anti-Hallucination Guardrails & Negative Constraint Guarantee
+- **Automated Citation Stripping:** When an LLM includes fabricated citations (e.g. `[99]` or invented document IDs), `CitationVerificationService` cleans the answer text, removes the markers, and attaches the list of stripped tags to the API response (`invalid_citations_stripped`).
+- **Negative Constraint Guarantee (Coca-Cola Recipe Test):** Out-of-context or adversarial queries that have no factual grounding in the indexed documents (e.g., *"What is the secret recipe of Coca-Cola?"*) are guaranteed by [`src/services/llm.py`](file:///e:/Devpilot/src/services/llm.py) and verified by [`tests/test_boundaries.py`](file:///e:/Devpilot/tests/test_boundaries.py) to return a polite rejection:
+  > *"I do not have enough information in the provided documents to answer this question."*
+  The verification service confirms:
+  $$\text{citations} = [], \quad \text{unsupported\_claims\_rate} = 0.0, \quad \text{citation\_correctness} = 1.0, \quad \text{is\_grounded} = \text{True}$$
+
+### 5.5 Database Hardening: Composite Multi-Tenant Indexes & Bounded Pagination
+- **Composite Indexes:** Migration scripts define composite indexes across high-traffic multi-tenant query paths:
+  - `ix_document_chunks_proj_comp`: `(project_id, chunk_index)`
+  - `ix_processing_jobs_proj_tenant`: `(project_id, status)`
+- **Deterministic Bounded Pagination:** All list endpoints enforce `skip >= 0` and `limit <= 100` via FastAPI query constraints, sorted deterministically by primary keys (`id ASC`) to eliminate pagination drift.
+- **Global Error Handlers:** [`src/main.py`](file:///e:/Devpilot/src/main.py) registers explicit exception handlers for `EntityConflictError` (`HTTP 409 Conflict`) and `ValueError` (`HTTP 422 Unprocessable Entity`), preventing unhandled 500 server crashes on malformed request bodies.
 
 ---
 
