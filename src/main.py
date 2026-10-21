@@ -12,6 +12,7 @@ from src.core.config import settings
 from src.core.database import engine
 from src.core.exceptions import (
     DevPilotException,
+    EntityConflictError,
     EntityNotFoundError,
     FileTooLargeError,
     UnsupportedFileExtensionError,
@@ -108,11 +109,27 @@ def create_application() -> FastAPI:
             content={"detail": exc.message, "details": exc.details},
         )
 
+    @app.exception_handler(EntityConflictError)
+    async def entity_conflict_handler(
+        request: Request, exc: EntityConflictError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": exc.message, "details": exc.details},
+        )
+
     @app.exception_handler(DevPilotException)
     async def devpilot_exception_handler(request: Request, exc: DevPilotException) -> JSONResponse:
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"detail": exc.message, "details": exc.details},
+        )
+
+    @app.exception_handler(ValueError)
+    async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"detail": str(exc)},
         )
 
     # Include Routers

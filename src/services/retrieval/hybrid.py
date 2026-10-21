@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -24,7 +25,7 @@ def tokenize(text: str) -> list[str]:
 
 
 # In-memory index cache for BM25: cache_key -> (corpus_length, bm25_instance, corpus_chunks)
-_bm25_cache: dict[str, tuple[int, BM25Okapi, list[dict[str, Any]]]] = {}
+_bm25_cache: dict[str, tuple[int, BM25Okapi | None, list[dict[str, Any]]]] = {}
 
 
 def _get_corpus_cache_key(corpus_chunks: list[dict[str, Any]]) -> str:
@@ -44,7 +45,7 @@ def _get_corpus_cache_key(corpus_chunks: list[dict[str, Any]]) -> str:
 
 def get_or_create_bm25_index(
     corpus_chunks: list[dict[str, Any]],
-) -> tuple[BM25Okapi, list[dict[str, Any]]]:
+) -> tuple[BM25Okapi | None, list[dict[str, Any]]]:
     """Retrieve cached BM25Okapi instance or build and cache a new one if corpus changed."""
     cache_key = _get_corpus_cache_key(corpus_chunks)
     corpus_len = len(corpus_chunks)
@@ -55,6 +56,12 @@ def get_or_create_bm25_index(
             return cached_bm25, cached_chunks
 
     tokenized_corpus = [tokenize(c.get("content", "")) for c in corpus_chunks]
+    # Guard: If no chunks have indexable tokens (e.g. empty or emojis/punctuation only),
+    # avoid ZeroDivisionError inside BM25Okapi IDF computation.
+    if not any(len(toks) > 0 for toks in tokenized_corpus):
+        _bm25_cache[cache_key] = (corpus_len, None, corpus_chunks)
+        return None, corpus_chunks
+
     bm25 = BM25Okapi(tokenized_corpus)
     _bm25_cache[cache_key] = (corpus_len, bm25, corpus_chunks)
     return bm25, corpus_chunks
@@ -81,7 +88,7 @@ def bm25_search(
     Returns:
         List of chunks sorted by descending BM25 score with 'bm25_score' attached.
     """
-    if not corpus_chunks:
+    if not corpus_chunks or top_k <= 0:
         return []
 
     query_tokens = tokenize(query)
@@ -95,12 +102,22 @@ def bm25_search(
         return results
 
     bm25, indexed_chunks = get_or_create_bm25_index(corpus_chunks)
+    if bm25 is None:
+        # Corpus contains no indexable tokens (e.g., all empty or emoji-only)
+        results = []
+        for c in corpus_chunks[:top_k]:
+            item = dict(c)
+            item["bm25_score"] = 0.0
+            results.append(item)
+        return results
+
     scores = bm25.get_scores(query_tokens)
 
     scored_chunks = []
     for chunk, score in zip(indexed_chunks, scores):
         item = dict(chunk)
-        item["bm25_score"] = float(score)
+        float_score = float(score)
+        item["bm25_score"] = float_score if math.isfinite(float_score) else 0.0
         scored_chunks.append(item)
 
     scored_chunks.sort(key=lambda x: x["bm25_score"], reverse=True)
@@ -128,6 +145,10 @@ def reciprocal_rank_fusion(
     Returns:
         List of fused, deduplicated candidate chunks sorted by descending RRF score.
     """
+    if top_n <= 0 or (not dense_results and not sparse_results):
+        return []
+
+    safe_k = max(1, k)
     rrf_scores: dict[str, float] = {}
     doc_lookup: dict[str, dict[str, Any]] = {}
 
@@ -138,12 +159,14 @@ def reciprocal_rank_fusion(
         if "id" in doc and doc["id"] is not None:
             return str(doc["id"])
         # Fallback to content hash or content slice
-        return str(hash(doc.get("content", "")))
+        if doc.get("content"):
+            return str(hash(doc.get("content", "")))
+        return str(id(doc))
 
     # 1. Accumulate RRF scores from dense candidates
     for rank, doc in enumerate(dense_results):
         doc_id = get_doc_id(doc)
-        score = 1.0 / (k + rank + 1)
+        score = 1.0 / (safe_k + rank + 1)
         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + score
         if doc_id not in doc_lookup:
             doc_lookup[doc_id] = dict(doc)
@@ -151,7 +174,7 @@ def reciprocal_rank_fusion(
     # 2. Accumulate RRF scores from sparse candidates
     for rank, doc in enumerate(sparse_results):
         doc_id = get_doc_id(doc)
-        score = 1.0 / (k + rank + 1)
+        score = 1.0 / (safe_k + rank + 1)
         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + score
         if doc_id not in doc_lookup:
             doc_lookup[doc_id] = dict(doc)

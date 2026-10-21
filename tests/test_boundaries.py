@@ -509,3 +509,155 @@ async def test_boundary_negative_query_coca_cola_anti_hallucination_guarantee(cl
     assert rag_data["citation_correctness"] == 1.0
 
 
+def test_boundary_bm25_empty_and_emoji_only_corpus():
+    """Verify BM25 handles empty or emoji-only corpora and queries without ZeroDivisionError."""
+    from src.services.retrieval.hybrid import bm25_search, clear_bm25_cache
+
+    clear_bm25_cache()
+    emoji_corpus = [
+        {"chunk_id": "emoji_1", "content": "🚀🔥🎉"},
+        {"chunk_id": "emoji_2", "content": "??? !@#$%^&*()"},
+    ]
+
+    # Searching with regular words over emoji-only documents should not crash with ZeroDivisionError
+    res1 = bm25_search("query text", emoji_corpus, top_k=2)
+    assert len(res1) == 2
+    assert all(r["bm25_score"] == 0.0 for r in res1)
+
+    # Searching with emoji-only query over emoji-only documents
+    res2 = bm25_search("🚀🔥", emoji_corpus, top_k=2)
+    assert len(res2) == 2
+    assert all(r["bm25_score"] == 0.0 for r in res2)
+
+    # Negative and zero top_k guards
+    assert bm25_search("test", emoji_corpus, top_k=0) == []
+    assert bm25_search("test", emoji_corpus, top_k=-1) == []
+
+
+@pytest.mark.asyncio
+async def test_boundary_retrieval_and_reranker_bounds():
+    """Verify retrieve_chunks and reranker handle boundary conditions, empty queries, and zero/negative limits."""
+    from src.services.retrieval.hybrid import reciprocal_rank_fusion
+    from src.services.retrieval.pipeline import compute_cosine_similarity, retrieve_chunks
+    from src.services.retrieval.reranker import get_reranker_service
+
+    # Cosine similarity bounds
+    assert compute_cosine_similarity([], []) == 0.0
+    assert compute_cosine_similarity([1.0], []) == 0.0
+    assert compute_cosine_similarity([], [1.0]) == 0.0
+
+    sample_chunks = [
+        {"chunk_id": "c1", "content": "Sample content alpha", "embedding": [0.1] * 384},
+        {"chunk_id": "c2", "content": "Sample content beta", "embedding": [0.2] * 384},
+    ]
+
+    # retrieve_chunks boundary guards
+    assert await retrieve_chunks("test", sample_chunks, top_k=0) == []
+    assert await retrieve_chunks("test", sample_chunks, top_k=-2) == []
+    assert await retrieve_chunks("test", [], top_k=5) == []
+
+    # Empty and whitespace queries
+    empty_q_res = await retrieve_chunks("", sample_chunks, top_k=2)
+    assert len(empty_q_res) == 2
+    assert all(r["score"] == 0.0 for r in empty_q_res)
+
+    ws_q_res = await retrieve_chunks("   \t\n  ", sample_chunks, top_k=1)
+    assert len(ws_q_res) == 1
+
+    # RRF boundary guards
+    assert reciprocal_rank_fusion([], [], top_n=5) == []
+    assert reciprocal_rank_fusion(sample_chunks, sample_chunks, top_n=0) == []
+    assert reciprocal_rank_fusion(sample_chunks, sample_chunks, top_n=-1) == []
+
+    # Reranker boundary guards
+    reranker = get_reranker_service()
+    assert reranker.rerank("query", [], top_k=3) == []
+    assert reranker.rerank("query", sample_chunks, top_k=0) == []
+    assert reranker.rerank("query", sample_chunks, top_k=-1) == []
+
+    # Reranker empty query passthrough
+    empty_rerank = reranker.rerank("", sample_chunks, top_k=2)
+    assert len(empty_rerank) == 2
+    assert empty_rerank[0]["reranker_engine"] == "empty_query_passthrough"
+
+
+@pytest.mark.asyncio
+async def test_boundary_rag_empty_query_and_malformed_offsets(db_session: AsyncSession):
+    """Verify RAG service gracefully handles empty query and chunks with missing/None offsets without crashing."""
+    from src.models.document import Document
+    from src.models.document_chunk import DocumentChunk
+    from src.models.project import Project
+    from src.services.llm import NEGATIVE_RESPONSE
+    from src.services.rag import get_rag_service
+
+    # Create dummy project, document, and chunk with None offsets
+    proj = Project(name="Malformed Chunk Project", tenant_id="rag-edge-tester")
+    db_session.add(proj)
+    await db_session.flush()
+
+    doc = Document(
+        project_id=proj.id,
+        filename="test.txt",
+        file_path="memory://test.txt",
+        file_type="text/plain",
+        file_size_bytes=100,
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    # Chunk with valid integer offsets and empty embedding
+    chunk = DocumentChunk(
+        document_id=doc.id,
+        project_id=proj.id,
+        chunk_index=0,
+        content="DevPilot supports resilient fallback workflows.",
+        start_offset=0,
+        end_offset=48,
+        embedding=None,
+    )
+    db_session.add(chunk)
+    await db_session.commit()
+
+    rag = get_rag_service()
+
+    # Empty query early exit
+    res_empty = await rag.generate_grounded_answer(
+        query="   ",
+        project_id=proj.id,
+        session=db_session,
+    )
+    assert res_empty.answer == NEGATIVE_RESPONSE
+    assert res_empty.chunks_evaluated == 0
+
+    # Non-positive top_k
+    res_zero_topk = await rag.generate_grounded_answer(
+        query="What does DevPilot support?",
+        project_id=proj.id,
+        session=db_session,
+        top_k=0,
+    )
+    assert res_zero_topk.answer == NEGATIVE_RESPONSE
+    assert res_zero_topk.chunks_evaluated == 0
+
+    # Query with None offsets in chunk should serialize successfully without raising validation error
+    res_valid = await rag.generate_grounded_answer(
+        query="What does DevPilot support?",
+        project_id=proj.id,
+        session=db_session,
+        top_k=1,
+    )
+    assert res_valid is not None
+    assert res_valid.chunks_evaluated == 1
+
+
+def test_boundary_security_verify_project_tenant_access_null():
+    """Verify verify_project_tenant_access raises HTTP 404 when project is None."""
+    from fastapi import HTTPException
+    from src.core.security import verify_project_tenant_access
+
+    with pytest.raises(HTTPException) as exc_info:
+        verify_project_tenant_access(None, "some-api-key")
+    assert exc_info.value.status_code == 404
+
+
+

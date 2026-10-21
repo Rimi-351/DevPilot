@@ -122,7 +122,7 @@ class CitationVerificationService:
             matched_chunk = valid_chunk_ids.get(uuid_str) or valid_doc_ids.get(uuid_str)
             if matched_chunk:
                 c_id = matched_chunk.get("chunk_id")
-                if c_id not in seen_valid_chunk_ids:
+                if c_id is not None and c_id not in seen_valid_chunk_ids:
                     seen_valid_chunk_ids.add(c_id)
                     valid_chunk_matches.append(matched_chunk)
                 # Normalize to standard 1-based bracket [index]
@@ -147,7 +147,7 @@ class CitationVerificationService:
             matched_chunk = valid_chunk_ids.get(tag_val) or valid_doc_ids.get(tag_val)
             if matched_chunk:
                 c_id = matched_chunk.get("chunk_id")
-                if c_id not in seen_valid_chunk_ids:
+                if c_id is not None and c_id not in seen_valid_chunk_ids:
                     seen_valid_chunk_ids.add(c_id)
                     valid_chunk_matches.append(matched_chunk)
                 return f"[{matched_chunk.get('index', 1)}]"
@@ -162,7 +162,14 @@ class CitationVerificationService:
 
         def replace_numeric_citation(match: re.Match[str]) -> str:
             raw_tag = match.group(0)
-            numbers = [int(n.strip()) for n in match.group(1).split(",") if n.strip()]
+            numbers: list[int] = []
+            for n in match.group(1).split(","):
+                cleaned_n = n.strip()
+                if cleaned_n.isdigit():
+                    try:
+                        numbers.append(int(cleaned_n))
+                    except (ValueError, OverflowError):
+                        continue
 
             valid_nums: list[int] = []
             for num in numbers:
@@ -170,7 +177,7 @@ class CitationVerificationService:
                     valid_nums.append(num)
                     chunk = valid_indices[num]
                     c_id = chunk.get("chunk_id")
-                    if c_id not in seen_valid_chunk_ids:
+                    if c_id is not None and c_id not in seen_valid_chunk_ids:
                         seen_valid_chunk_ids.add(c_id)
                         valid_chunk_matches.append(chunk)
                 else:

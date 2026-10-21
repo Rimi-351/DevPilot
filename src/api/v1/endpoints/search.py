@@ -58,6 +58,14 @@ async def search_project_documents(
         )
     verify_project_tenant_access(project, api_key)
 
+    # Fast path: Empty or whitespace-only search query returns 0 results
+    if not request.query or not request.query.strip():
+        return SearchResponse(
+            query=request.query,
+            total_results=0,
+            results=[],
+        )
+
     # 2. Retrieve or compute query representation based on mode
     if request.mode == "vector":
         # Vector mode: generate embedding
@@ -85,11 +93,11 @@ async def search_project_documents(
             {
                 "chunk_id": chunk.id,
                 "document_id": chunk.document_id,
-                "filename": filename,
-                "content": chunk.content,
-                "start_offset": chunk.start_offset,
-                "end_offset": chunk.end_offset,
-                "chunk_index": chunk.chunk_index,
+                "filename": filename or "unknown",
+                "content": chunk.content or "",
+                "start_offset": chunk.start_offset if chunk.start_offset is not None else 0,
+                "end_offset": chunk.end_offset if chunk.end_offset is not None else 0,
+                "chunk_index": chunk.chunk_index if chunk.chunk_index is not None else 0,
                 "embedding": chunk.embedding or [],
             }
             for chunk, filename in rows
@@ -106,12 +114,12 @@ async def search_project_documents(
                 SearchChunkResult(
                     chunk_id=c["chunk_id"],
                     document_id=c["document_id"],
-                    filename=c["filename"],
-                    content=c["content"],
+                    filename=c.get("filename") or "unknown",
+                    content=c.get("content") or "",
                     score=round(final_score, 6),
-                    start_offset=c["start_offset"],
-                    end_offset=c["end_offset"],
-                    chunk_index=c["chunk_index"],
+                    start_offset=c.get("start_offset") if c.get("start_offset") is not None else 0,
+                    end_offset=c.get("end_offset") if c.get("end_offset") is not None else 0,
+                    chunk_index=c.get("chunk_index") if c.get("chunk_index") is not None else 0,
                 )
             )
         return SearchResponse(
@@ -126,7 +134,7 @@ async def search_project_documents(
         chunks = [chunk for chunk, _ in rows]
         ranked_chunks = lexical_keyword_search(request.query, chunks)
         # Map chunk IDs to filenames for provenance
-        chunk_id_to_filename = {chunk.id: filename for chunk, filename in rows}
+        chunk_id_to_filename = {chunk.id: (filename or "unknown") for chunk, filename in rows}
         query_tokens = set(re.findall(r"\w+", request.query.lower()))
         for chunk in ranked_chunks:
             filename = chunk_id_to_filename.get(chunk.id, "unknown")
@@ -138,11 +146,11 @@ async def search_project_documents(
                     chunk_id=chunk.id,
                     document_id=chunk.document_id,
                     filename=filename,
-                    content=chunk.content,
+                    content=chunk.content or "",
                     score=round(score, 6),
-                    start_offset=chunk.start_offset,
-                    end_offset=chunk.end_offset,
-                    chunk_index=chunk.chunk_index,
+                    start_offset=chunk.start_offset if chunk.start_offset is not None else 0,
+                    end_offset=chunk.end_offset if chunk.end_offset is not None else 0,
+                    chunk_index=chunk.chunk_index if chunk.chunk_index is not None else 0,
                 )
             )
     else:
@@ -154,18 +162,19 @@ async def search_project_documents(
                 SearchChunkResult(
                     chunk_id=chunk.id,
                     document_id=chunk.document_id,
-                    filename=filename,
-                    content=chunk.content,
+                    filename=filename or "unknown",
+                    content=chunk.content or "",
                     score=round(score, 6),
-                    start_offset=chunk.start_offset,
-                    end_offset=chunk.end_offset,
-                    chunk_index=chunk.chunk_index,
+                    start_offset=chunk.start_offset if chunk.start_offset is not None else 0,
+                    end_offset=chunk.end_offset if chunk.end_offset is not None else 0,
+                    chunk_index=chunk.chunk_index if chunk.chunk_index is not None else 0,
                 )
             )
 
-    # 5. Sort descending and pick top_k
+    # 5. Sort descending and pick top_k safely
     scored_results.sort(key=lambda item: item.score, reverse=True)
-    top_results = scored_results[: request.top_k]
+    safe_top_k = max(1, request.top_k)
+    top_results = scored_results[:safe_top_k]
 
     return SearchResponse(
         query=request.query,

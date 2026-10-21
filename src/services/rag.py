@@ -61,6 +61,20 @@ class RagService:
         Returns:
             RagResponse containing answer, citations, chunks evaluated, and grounding metrics.
         """
+        # Early guard: empty or whitespace-only query or non-positive top_k
+        if not query or not query.strip() or top_k <= 0:
+            return RagResponse(
+                query=query,
+                answer=NEGATIVE_RESPONSE,
+                citations=[],
+                chunks_evaluated=0,
+                search_mode=search_mode,
+                is_grounded=True,
+                unsupported_claims_rate=0.0,
+                citation_correctness=1.0,
+                invalid_citations_stripped=[],
+            )
+
         # 1. Fetch chunks belonging to project joined with Document for original filename
         stmt = (
             select(DocumentChunk, Document.filename)
@@ -83,17 +97,17 @@ class RagService:
                 invalid_citations_stripped=[],
             )
 
-        # 2. Format candidate chunk dictionaries
+        # 2. Format candidate chunk dictionaries with safe defaults
         candidate_chunks: list[dict[str, Any]] = []
         for chunk, filename in rows:
             candidate_chunks.append({
                 "chunk_id": chunk.id,
                 "document_id": chunk.document_id,
-                "filename": filename,
-                "content": chunk.content,
-                "start_offset": chunk.start_offset,
-                "end_offset": chunk.end_offset,
-                "chunk_index": chunk.chunk_index,
+                "filename": filename or "unknown",
+                "content": chunk.content or "",
+                "start_offset": chunk.start_offset if chunk.start_offset is not None else 0,
+                "end_offset": chunk.end_offset if chunk.end_offset is not None else 0,
+                "chunk_index": chunk.chunk_index if chunk.chunk_index is not None else 0,
                 "embedding": chunk.embedding or [],
             })
 
@@ -103,7 +117,7 @@ class RagService:
             chunks=candidate_chunks,
             search_mode=search_mode,
             top_k=top_k,
-            chunk_limit=chunk_limit,
+            chunk_limit=max(1, chunk_limit),
         )
 
         if not ranked_chunks:
@@ -140,17 +154,19 @@ class RagService:
             strip_invalid=strip_invalid_citations,
         )
 
-        # 7. Map verified citations to Citation models
+        # 7. Map verified citations to Citation models with safe offsets
         citations: list[Citation] = []
         for idx, c in enumerate(guardrail_result.valid_citations, start=1):
+            start_off = c.get("start_offset")
+            end_off = c.get("end_offset")
             citations.append(
                 Citation(
-                    citation_id=c.get("index", idx),
+                    citation_id=int(c.get("index") or idx),
                     chunk_id=c["chunk_id"],
                     document_id=c["document_id"],
-                    filename=c["filename"],
-                    start_offset=c["start_offset"],
-                    end_offset=c["end_offset"],
+                    filename=c.get("filename") or "unknown",
+                    start_offset=start_off if start_off is not None else 0,
+                    end_offset=end_off if end_off is not None else 0,
                 )
             )
 

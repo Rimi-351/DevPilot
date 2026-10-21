@@ -76,7 +76,7 @@ async def get_current_tenant(
     return await get_current_api_key(api_key)
 
 
-def verify_project_tenant_access(project: Project, current_api_key: str) -> None:
+def verify_project_tenant_access(project: Optional[Project], current_api_key: str) -> None:
     """Enforce tenant isolation on a project entity.
 
     Args:
@@ -84,8 +84,15 @@ def verify_project_tenant_access(project: Project, current_api_key: str) -> None
         current_api_key: The authenticated API key of the caller.
 
     Raises:
+        HTTPException (404): If the project is None.
         HTTPException (403): If the project belongs to another tenant.
     """
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found.",
+        )
+
     owner = project.tenant_id or project.owner_api_key
     # If the project is claimed by an owner, ensure the caller matches
     if owner and owner != current_api_key:

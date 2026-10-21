@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
@@ -104,8 +105,25 @@ class RerankerService:
         Returns:
             List of candidate dictionaries sorted descending by 'rerank_score', trimmed to top_k.
         """
-        if not candidates:
+        if not candidates or top_k <= 0:
             return []
+
+        # Empty or whitespace-only query: return candidate chunks with existing or default scores
+        if not query or not query.strip():
+            empty_reranked = []
+            for rank_idx, candidate in enumerate(candidates[:top_k]):
+                item = dict(candidate)
+                existing_score = (
+                    item.get("rrf_score")
+                    or item.get("score")
+                    or item.get("bm25_score")
+                    or (1.0 / (rank_idx + 1))
+                )
+                item["rerank_score"] = float(existing_score)
+                item["reranker_applied"] = False
+                item["reranker_engine"] = "empty_query_passthrough"
+                empty_reranked.append(item)
+            return empty_reranked
 
         # Script-aware dynamic routing: If query contains native Bengali script
         # and current model is a monolingual English cross-encoder (e.g. ms-marco)
@@ -137,9 +155,8 @@ class RerankerService:
                 reranked.append(item)
             return reranked
 
-
         # Prepare (query, passage) pairs
-        pairs = [(query, c.get("content", "")) for c in candidates]
+        pairs = [(query, c.get("content") or "") for c in candidates]
 
         model = self._get_model()
         scores: list[float] = []
@@ -168,8 +185,6 @@ class RerankerService:
 
         # Optional RRF-blending: blend cross-encoder sigmoid probability with normalized RRF score
         if self.blend_rrf_weight > 0.0 and engine == "cross_encoder" and len(scores) > 1:
-            import math
-
             def _sigmoid(x: float) -> float:
                 return 1.0 / (1.0 + math.exp(-max(min(x, 20.0), -20.0)))
 
@@ -190,7 +205,8 @@ class RerankerService:
         reranked: list[dict[str, Any]] = []
         for candidate, score in zip(candidates, scores):
             item = dict(candidate)
-            item["rerank_score"] = float(score)
+            float_score = float(score)
+            item["rerank_score"] = float_score if math.isfinite(float_score) else 0.0
             item["reranker_applied"] = True
             item["reranker_engine"] = engine
             reranked.append(item)

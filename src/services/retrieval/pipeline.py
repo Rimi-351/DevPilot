@@ -16,6 +16,9 @@ def compute_cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
         return 0.0
 
     length = min(len(vec1), len(vec2))
+    if length == 0:
+        return 0.0
+
     dot_product = sum(vec1[i] * vec2[i] for i in range(length))
     norm1 = math.sqrt(sum(x * x for x in vec1[:length]))
     norm2 = math.sqrt(sum(y * y for y in vec2[:length]))
@@ -54,8 +57,14 @@ async def retrieve_chunks(
     Returns:
         Ranked list of chunk dictionaries trimmed to top_k.
     """
-    if not chunks:
+    if not chunks or top_k <= 0:
         return []
+
+    # Empty or whitespace query guard
+    if not query or not query.strip():
+        return [dict(c, score=0.0) for c in chunks[:top_k]]
+
+    safe_chunk_limit = max(1, chunk_limit)
 
     # 1. Compute Dense Vector Rankings
     dense_scored = []
@@ -65,7 +74,7 @@ async def retrieve_chunks(
 
     for c in chunks:
         chunk_emb = c.get("embedding") or []
-        sim = compute_cosine_similarity(query_vector, chunk_emb)
+        sim = compute_cosine_similarity(query_vector, chunk_emb) if query_vector else 0.0
         item = dict(c)
         item["score"] = sim
         dense_scored.append(item)
@@ -77,11 +86,11 @@ async def retrieve_chunks(
         return dense_scored[:top_k]
 
     # 2. Compute BM25 Sparse Rankings
-    sparse_candidates = bm25_search(query, chunks, top_k=chunk_limit)
+    sparse_candidates = bm25_search(query, chunks, top_k=safe_chunk_limit)
 
     # 3. Fuse via Reciprocal Rank Fusion (RRF)
-    dense_candidates = dense_scored[:chunk_limit]
-    rrf_top_n = max(chunk_limit, 10) if search_mode == "hybrid_rerank" else top_k
+    dense_candidates = dense_scored[:safe_chunk_limit]
+    rrf_top_n = max(safe_chunk_limit, 10) if search_mode == "hybrid_rerank" else top_k
     fused_candidates = reciprocal_rank_fusion(
         dense_results=dense_candidates,
         sparse_results=sparse_candidates,
