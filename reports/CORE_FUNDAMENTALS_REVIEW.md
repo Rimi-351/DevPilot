@@ -1,7 +1,7 @@
 # DevPilot Core CS & Backend Fundamentals Review Guide
 ## Technical Interview Revision: DSA, Database Transactions, SQL Optimization & RESTful Architecture
 
-**Document Version:** 1.1.0  
+**Document Version:** 1.2.0  
 **Target Roles:** Senior Backend Engineer, Distributed Systems Engineer, AI Platform Architect  
 **Purpose:** Rapid technical interview revision mapping theoretical computer science principles directly to production code patterns inside DevPilot.
 
@@ -20,11 +20,12 @@
    - [2.2 Database Isolation Levels & Concurrency Anomalies (Dirty, Non-Repeatable, Phantom Reads)](#22-database-isolation-levels--concurrency-anomalies-dirty-non-repeatable-phantom-reads)
    - [2.3 How DevPilot Prevents "Ghost Chunk" Anomalies During Background Ingestion Failures](#23-how-devpilot-prevents-ghost-chunk-anomalies-during-background-ingestion-failures)
    - [2.4 Concurrency Engines: PostgreSQL MVCC vs. SQLite WAL File Locking](#24-concurrency-engines-postgresql-mvcc-vs-sqlite-wal-file-locking)
-4. [Section 3: SQL Query Optimization & Relational Modeling](#section-3-sql-query-optimization--relational-modeling)
-   - [3.1 Composite B-Tree Indexes & The Leftmost Prefix Rule](#31-composite-b-tree-indexes--the-leftmost-prefix-rule)
-   - [3.2 Covering Indexes & Index Range Scans](#32-covering-indexes--index-range-scans)
-   - [3.3 Analytical Window Functions & Partitioning (`DENSE_RANK()`)](#33-analytical-window-functions--partitioning-denserank)
-   - [3.4 Recursive CTEs for Self-Referencing Document Hierarchies](#34-recursive-ctes-for-self-referencing-document-hierarchies)
+4. [Section 3: SQL Indexing & Query Execution Plans](#section-3-sql-indexing--query-execution-plans)
+   - [3.1 Left-Prefix Rule in Composite B-Tree Indexes (`ix_projects_tenant_created`)](#31-left-prefix-rule-in-composite-b-tree-indexes-ix_projects_tenant_created)
+   - [3.2 Avoiding Filesorts & Temporary Tables in Execution Plans](#32-avoiding-filesorts--temporary-tables-in-execution-plans)
+   - [3.3 N+1 Query Mitigation in ORM Architectures (`selectinload` vs `joinedload`)](#33-n1-query-mitigation-in-orm-architectures-selectinload-vs-joinedload)
+   - [3.4 Keyset / Cursor vs. Offset Pagination Trade-offs & Drift Prevention](#34-keyset--cursor-vs-offset-pagination-trade-offs--drift-prevention)
+   - [3.5 Analytical Window Functions (`DENSE_RANK()`) & Recursive CTEs](#35-analytical-window-functions-denserank--recursive-ctes)
 5. [Section 4: HTTP Semantics & RESTful API Architecture](#section-4-http-semantics--restful-api-architecture)
    - [4.1 HTTP Method Idempotency & Safety](#41-http-method-idempotency--safety)
    - [4.2 Precise HTTP Status Code Taxonomy](#42-precise-http-status-code-taxonomy)
@@ -46,6 +47,7 @@ Min-Heap / Priority Queue         ──►  Top-K candidate selection (O(N log 
 Directed Acyclic Graph & FSM      ──►  4-phase bounded agentic FSM (SEARCH -> INSPECT -> ...)
 B-Tree Leftmost Prefix Rule       ──►  Composite indexes (tenant_id, created_at) avoiding filesort
 ACID Rollback Isolation           ──►  await session.rollback() preventing partial ghost chunks
+Keyset vs Offset Pagination       ──►  Bounded deterministic pagination with secondary tie-breaking
 HTTP Idempotency & Status Codes   ──►  Deterministic REST APIs, 401 perimeter, 403 BOLA defense
 ```
 
@@ -369,64 +371,149 @@ async with factory() as session:
 
 ---
 
-## Section 3: SQL Query Optimization & Relational Modeling
+## Section 3: SQL Indexing & Query Execution Plans
 
-### 3.1 Composite B-Tree Indexes & The Leftmost Prefix Rule
+### 3.1 Left-Prefix Rule in Composite B-Tree Indexes (`ix_projects_tenant_created`)
 
-#### The Rule:
-A composite B-Tree index on columns $(A, B, C)$ can serve queries filtering on:
-- $(A)$
-- $(A, B)$
-- $(A, B, C)$
-It **cannot** serve queries filtering only on $(B)$ or $(B, C)$ without a full index scan.
+#### The B-Tree Left-Prefix Rule:
+A composite B-Tree index on columns $(A, B, C)$ stores index keys sorted lexicographically: first by $A$, then by $B$ within each value of $A$, and finally by $C$ within each pair of $(A, B)$.
+Consequently, the index can accelerate queries filtering on:
+- Leading prefix: `WHERE A = ?`
+- Leading prefix + second column: `WHERE A = ? AND B = ?`
+- Full prefix: `WHERE A = ? AND B = ? AND C = ?`
+- Leading prefix + range/sort on second: `WHERE A = ? ORDER BY B DESC`
+
+It **cannot** accelerate queries filtering only on `WHERE B = ?` or `ORDER BY B` because the B-Tree is ordered by $A$ at the root level.
+
+```
+Composite B-Tree Structure: (tenant_id, created_at)
+
+Root Node: [('tenant_a', 2026-10-01) | ('tenant_b', 2026-10-02)]
+               /                                      \
+Leaf Node 1:                                      Leaf Node 2:
+('tenant_a', 2026-09-01) -> RowPtr 1             ('tenant_b', 2026-09-10) -> RowPtr 4
+('tenant_a', 2026-09-15) -> RowPtr 2             ('tenant_b', 2026-10-02) -> RowPtr 5
+('tenant_a', 2026-10-01) -> RowPtr 3             ('tenant_b', 2026-10-15) -> RowPtr 6
+```
 
 #### DevPilot Production Composite Indexes:
-```python
-# Project entity (src/models/project.py)
-Index("ix_projects_tenant_created", "tenant_id", "created_at")
-
-# ProcessingJob entity (src/models/processing_job.py)
-Index("ix_processing_jobs_project_status_created", "project_id", "status", "created_at")
-```
-
-#### Why Column Order Matters (Eliminating Filesort):
-Consider the query:
-```sql
-SELECT * FROM projects 
-WHERE tenant_id = 'tenant-xyz' 
-ORDER BY created_at DESC 
-LIMIT 20;
-```
-1. **If indexed on `(tenant_id)` alone:** The database jumps to `tenant_id = 'tenant-xyz'`, loads all 10,000 rows into memory, and executes an expensive **Filesort** (`Using filesort` in `EXPLAIN`).
-2. **With composite `(tenant_id, created_at)`:** The index entries for `'tenant-xyz'` are **already physically stored in sorted order by `created_at`** in the B-Tree leaf pages. The engine traverses the B-Tree in reverse and returns the first 20 rows immediately. **Zero filesort, $O(\log N)$ execution!**
+1. **`Index("ix_projects_tenant_created", "tenant_id", "created_at")` (`src/models/project.py`):**
+   - Query Pattern: `SELECT * FROM projects WHERE tenant_id = :id ORDER BY created_at DESC LIMIT 20;`
+   - **Left-Prefix Execution:** The query planner matches `tenant_id` on the leading index column ($O(\log N)$ point seek) and immediately streams rows in reverse along the physically pre-sorted `created_at` chain.
+2. **`Index("ix_processing_jobs_project_status_created", "project_id", "status", "created_at")` (`src/models/processing_job.py`):**
+   - Query Pattern: `SELECT * FROM processing_jobs WHERE project_id = :p_id AND status = 'PENDING' ORDER BY created_at ASC;`
+   - **Equality-First Rule:** Both `project_id` and `status` are exact equality constraints, allowing the index to pinpoint the exact contiguous range where jobs match both conditions, reading `created_at` in natural sorted order.
 
 ---
 
-### 3.2 Covering Indexes & Index Range Scans
+### 3.2 Avoiding Filesorts & Temporary Tables in Execution Plans
 
-#### Concept:
-A query is **covered** by an index if all requested columns exist inside the B-Tree index nodes, allowing the database engine to return data directly from the index without reading the underlying heap/table pages (**Index-Only Scan**).
+#### What is a Filesort (`Using filesort` / `Sort: external merge disk`)?
+When a query includes `ORDER BY`, if the database cannot read rows directly in the requested order from an index, it must execute a dedicated sort phase:
+1. The engine reads all candidate rows into a memory buffer (`sort_buffer_size` in MySQL, `work_mem` in PostgreSQL).
+2. If the candidate set exceeds memory, the engine writes intermediate blocks to temporary disk files and performs a multi-pass **External Merge Sort**.
+3. **Performance Impact:** Latency spikes from sub-millisecond B-Tree traversal to hundreds of milliseconds of disk I/O.
 
-#### DevPilot Implementation:
+#### How DevPilot Eliminates Filesorts:
+```sql
+EXPLAIN ANALYZE
+SELECT id, name, created_at FROM projects 
+WHERE tenant_id = 'demo-tenant-key' 
+ORDER BY created_at DESC 
+LIMIT 20;
+```
+- **Without Composite Index (Single index on `tenant_id`):**
+  `Bitmap Index Scan on ix_projects_tenant -> Bitmap Heap Scan -> Sort (quicksort, memory: 128kB)` ⚠️
+- **With Composite Index `(tenant_id, created_at)`:**
+  `Index Scan Backward using ix_projects_tenant_created on projects (cost=0.15..8.20 rows=20)` ⚡
+  **Zero filesort! Zero temporary memory or disk allocation!**
+
+---
+
+### 3.3 N+1 Query Mitigation in ORM Architectures (`selectinload` vs `joinedload`)
+
+#### The N+1 Anti-Pattern:
+When fetching parent entities and accessing their child relations in Python:
+```python
+# ANTI-PATTERN: N+1 Queries
+projects = (await session.execute(select(Project).where(Project.tenant_id == tenant_id))).scalars().all()
+for project in projects:  # N iterations
+    print(len(project.documents))  # Triggers an individual SQL query for EACH project!
+```
+- Total Queries: 1 initial query + $N$ child queries = $N+1$ queries.
+- With 100 projects and a 5ms database round-trip: $1 + (100 \times 5\text{ ms}) = \mathbf{505\text{ ms}}$ of serial latency!
+
+#### Mitigation in SQLAlchemy Async:
+
+```python
+from sqlalchemy.orm import selectinload, joinedload
+
+# Solution 1: selectinload (Recommended for 1-to-Many Collections)
+stmt = (
+    select(Project)
+    .where(Project.tenant_id == tenant_id)
+    .options(selectinload(Project.documents))
+)
+projects = (await session.execute(stmt)).scalars().all()
+```
+- **How `selectinload` works:** Emits exactly **2 SQL queries** regardless of $N$:
+  1. `SELECT * FROM projects WHERE tenant_id = :id;`
+  2. `SELECT * FROM documents WHERE project_id IN (:id1, :id2, ...);`
+  - Reconstructs collections in Python memory in $O(N)$ time.
+  - Avoids Cartesian product duplication.
+
+```python
+# Solution 2: joinedload (Recommended for 1-to-1 or Many-to-1 References)
+stmt = (
+    select(Document)
+    .options(joinedload(Document.project))
+)
+```
+- **How `joinedload` works:** Emits **1 single SQL query** using `LEFT OUTER JOIN`.
+  - Caution: On 1-to-many collections, `joinedload` duplicates parent columns across all child rows, inflating network bandwidth.
+
+---
+
+### 3.4 Keyset / Cursor vs. Offset Pagination Trade-offs & Drift Prevention
+
+| Dimension | Offset Pagination (`OFFSET S LIMIT L`) | Keyset / Cursor Pagination (`Seek Method`) |
+| :--- | :--- | :--- |
+| **SQL Pattern** | `SELECT * FROM docs ORDER BY created_at DESC LIMIT 20 OFFSET 1000;` | `SELECT * FROM docs WHERE created_at < :cursor ORDER BY created_at DESC LIMIT 20;` |
+| **Algorithmic Complexity** | **$O(S + L)$** — Must scan and discard $S$ rows | **$O(\log N + L)$** — Direct B-Tree point-seek |
+| **Deep Page Latency** | **Severe degradation** (Offset 500,000 takes seconds) | **Constant sub-millisecond** (Page 1 and Page 50,000 take $<2\text{ ms}$) |
+| **"Page Drift" Anomaly** | ⚠️ **Vulnerable:** If a row is inserted while on Page 1, Page 2 repeats the last item from Page 1! | 🛡️ **Immune:** Cursor pins position to exact row value; new inserts never cause duplicated items |
+| **Random Page Navigation** | Can jump directly to arbitrary page (e.g. Page 15) | Can only navigate sequentially (Next / Previous cursor) |
+
+#### DevPilot's Bounded Pagination Hardening (`src/api/deps.py`):
+For public REST simplicity, DevPilot provides offset pagination while strictly defending against denial-of-service and pagination drift:
+1. **Bounded Slicing Invariant:**
+   ```python
+   skip = max(0, skip)
+   limit = min(max(1, limit), 100)  # Hard cap at 100 rows per request
+   ```
+2. **Deterministic Tie-Breaking:**
+   ```sql
+   ORDER BY created_at DESC, id ASC
+   ```
+   If multiple projects share the exact same microsecond timestamp, secondary sorting on primary key `id` guarantees a strictly deterministic ordering, preventing flaky pagination results.
+
+---
+
+### 3.5 Analytical Window Functions (`DENSE_RANK()`) & Recursive CTEs
+
+#### Covering Index for Rapid Index Range Scans:
 ```python
 Index("ix_document_chunks_document_index", "document_id", "chunk_index")
 ```
-When retrieving chunk indices for a document:
+When retrieving chunk indices for document citation reconstruction:
 ```sql
 SELECT chunk_index FROM document_chunks 
 WHERE document_id = :doc_id 
 ORDER BY chunk_index ASC;
 ```
-The query planner satisfies this entirely from the index tree leaf nodes in $O(K)$ time without touching table storage.
+The query planner satisfies this entirely from the index tree leaf nodes in $O(K)$ time without touching table storage (**Index-Only Scan**).
 
----
-
-### 3.3 Analytical Window Functions & Partitioning (`DENSE_RANK()`)
-
-#### Concept:
-Window functions calculate aggregate values over a partition of rows without collapsing the result set like `GROUP BY`.
-
-#### Canonical Pattern: `DENSE_RANK()` vs `RANK()` vs `ROW_NUMBER()`
+#### Window Functions: `DENSE_RANK()` vs `RANK()` vs `ROW_NUMBER()`:
 ```sql
 SELECT 
     project_id,
@@ -437,37 +524,26 @@ SELECT
     DENSE_RANK() OVER (PARTITION BY project_id ORDER BY duration_seconds ASC) AS dense_rank_val
 FROM processing_jobs;
 ```
+- `ROW_NUMBER()` assigns contiguous integers ($1, 2, 3$).
+- `RANK()` leaves gaps after ties ($1, 1, 3$).
+- `DENSE_RANK()` leaves no gaps after ties ($1, 1, 2$). To find "Top 3 fastest ingestion jobs per project", always filter `WHERE dense_rank_val <= 3`.
 
-| Duration | `ROW_NUMBER()` | `RANK()` (Gaps) | `DENSE_RANK()` (No Gaps) |
-| :---: | :---: | :---: | :---: |
-| 1.2s | 1 | 1 | 1 |
-| 1.2s | 2 | 1 | 1 |
-| 2.5s | 3 | 3 ⚠️ | **2** ✅ |
-| 3.1s | 4 | 4 | 3 |
-
-*Key Interview Takeaway:* To find "Top 3 distinct salaries" or "Top 3 fastest jobs", always use `DENSE_RANK() <= 3`.
-
----
-
-### 3.4 Recursive CTEs for Self-Referencing Document Hierarchies
-
-#### Syntax Anatomy:
+#### Recursive CTE for Document Tree Traversal:
 ```sql
-WITH RECURSIVE TreeCTE AS (
-    -- 1. Anchor Member (Base Case: Target Node)
-    SELECT id, parent_id, title, 0 AS depth
+WITH RECURSIVE DocumentBreadcrumbs AS (
+    -- Anchor Member (Base Case: Target Document)
+    SELECT id, parent_id, title, CAST(title AS VARCHAR(1000)) AS path, 0 AS depth
     FROM documents WHERE id = :target_id
 
     UNION ALL
 
-    -- 2. Recursive Member (Traverse Parent References)
-    SELECT p.id, p.parent_id, p.title, t.depth + 1
+    -- Recursive Member (Walk upwards to root)
+    SELECT p.id, p.parent_id, p.title, CAST(p.title || ' > ' || b.path AS VARCHAR(1000)), b.depth + 1
     FROM documents p
-    JOIN TreeCTE t ON p.id = t.parent_id
+    JOIN DocumentBreadcrumbs b ON p.id = b.parent_id
 )
-SELECT * FROM TreeCTE ORDER BY depth DESC;
+SELECT id, title, path, depth FROM DocumentBreadcrumbs ORDER BY depth DESC;
 ```
-- **Execution Lifecycle:** The engine seeds working table with the Anchor Member, joins the Recursive Member iteratively until the working table is empty, and performs a final `UNION ALL`.
 
 ---
 
@@ -537,9 +613,11 @@ Tier 2: Object-Level Authorization
    It smooths rank transitions ($\frac{1}{61}$ vs $\frac{1}{62}$) so that documents ranked in the top-10 of *both* dense and sparse lists score higher than an outlier ranked #1 in only one list.
 2. **Why put `tenant_id` before `created_at` in composite indexes?**  
    The leftmost prefix rule isolates the tenant's partition in $O(\log N)$ and streams pre-sorted records directly off the index leaf pages without an in-memory filesort.
-3. **What is the difference between `RANK()` and `DENSE_RANK()`?**  
-   `RANK()` leaves gaps after ties ($1, 1, 3$); `DENSE_RANK()` assigns contiguous integers without gaps ($1, 1, 2$), making it ideal for "Top 3 unique values".
-4. **How do you prevent ghost chunks during worker failure?**  
+3. **How do you avoid an N+1 query problem in SQLAlchemy Async?**  
+   Use `.options(selectinload(Parent.children))` to load child collections in a single secondary `WHERE parent_id IN (...)` query instead of querying in a loop.
+4. **Why is Keyset pagination superior to Offset pagination for deep queries?**  
+   Offset scans and discards $S$ rows ($O(S + L)$), degrading on large offsets; keyset pagination performs a direct B-Tree point-seek on indexed columns ($O(\log N + L)$) and prevents page drift.
+5. **How do you prevent ghost chunks during worker failure?**  
    Wrap database chunk staging in `try...except` and immediately execute `await session.rollback()` to flush the SQLAlchemy identity map before committing the `FAILED` state.
-5. **What is the difference between HTTP 401 and HTTP 403?**  
+6. **What is the difference between HTTP 401 and HTTP 403?**  
    `401 Unauthorized` means *"I do not know who you are (missing/invalid credentials)"*. `403 Forbidden` means *"I know who you are, but you do not have permission to access this object"*.
