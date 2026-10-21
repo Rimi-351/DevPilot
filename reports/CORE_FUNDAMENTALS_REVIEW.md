@@ -1,7 +1,7 @@
 # DevPilot Core CS & Backend Fundamentals Review Guide
-## Technical Interview Revision: DSA, SQL Optimization, Concurrency & RESTful Architecture
+## Technical Interview Revision: DSA, Database Transactions, SQL Optimization & RESTful Architecture
 
-**Document Version:** 1.0.0  
+**Document Version:** 1.1.0  
 **Target Roles:** Senior Backend Engineer, Distributed Systems Engineer, AI Platform Architect  
 **Purpose:** Rapid technical interview revision mapping theoretical computer science principles directly to production code patterns inside DevPilot.
 
@@ -15,15 +15,16 @@
    - [1.2 Hash Maps & Inverted Indexes (BM25 Lexical Retrieval & RRF)](#12-hash-maps--inverted-indexes-bm25-lexical-retrieval--rrf)
    - [1.3 Heaps / Priority Queues & Top-K Selection (Candidate Slicing)](#13-heaps--priority-queues--top-k-selection-candidate-slicing)
    - [1.4 Directed Graphs & Finite State Machines (Bounded Agentic FSM)](#14-directed-graphs--finite-state-machines-bounded-agentic-fsm)
-3. [Section 2: SQL Query Optimization & Relational Modeling](#section-2-sql-query-optimization--relational-modeling)
-   - [2.1 Composite B-Tree Indexes & The Leftmost Prefix Rule](#21-composite-b-tree-indexes--the-leftmost-prefix-rule)
-   - [2.2 Covering Indexes & Index Range Scans](#22-covering-indexes--index-range-scans)
-   - [2.3 Analytical Window Functions & Partitioning](#23-analytical-window-functions--partitioning)
-   - [2.4 Recursive CTEs for Self-Referencing Document Hierarchies](#24-recursive-ctes-for-self-referencing-document-hierarchies)
-4. [Section 3: Database Transactions, Concurrency & ACID Guarantees](#section-3-database-transactions-concurrency--acid-guarantees)
-   - [3.1 ANSI SQL Transaction Isolation Levels & Concurrency Anomalies](#31-ansi-sql-transaction-isolation-levels--concurrency-anomalies)
-   - [3.2 Transaction Rollback Boundaries & Ghost Chunk Prevention](#32-transaction-rollback-boundaries--ghost-chunk-prevention)
-   - [3.3 PostgreSQL MVCC vs. SQLite File Locking & Concurrency](#33-postgresql-mvcc-vs-sqlite-file-locking--concurrency)
+3. [Section 2: Relational Database Transactions & Concurrency](#section-2-relational-database-transactions--concurrency)
+   - [2.1 ACID Properties & SQLAlchemy Async Transaction Management (`commit()` vs `rollback()`)](#21-acid-properties--sqlalchemy-async-transaction-management-commit-vs-rollback)
+   - [2.2 Database Isolation Levels & Concurrency Anomalies (Dirty, Non-Repeatable, Phantom Reads)](#22-database-isolation-levels--concurrency-anomalies-dirty-non-repeatable-phantom-reads)
+   - [2.3 How DevPilot Prevents "Ghost Chunk" Anomalies During Background Ingestion Failures](#23-how-devpilot-prevents-ghost-chunk-anomalies-during-background-ingestion-failures)
+   - [2.4 Concurrency Engines: PostgreSQL MVCC vs. SQLite WAL File Locking](#24-concurrency-engines-postgresql-mvcc-vs-sqlite-wal-file-locking)
+4. [Section 3: SQL Query Optimization & Relational Modeling](#section-3-sql-query-optimization--relational-modeling)
+   - [3.1 Composite B-Tree Indexes & The Leftmost Prefix Rule](#31-composite-b-tree-indexes--the-leftmost-prefix-rule)
+   - [3.2 Covering Indexes & Index Range Scans](#32-covering-indexes--index-range-scans)
+   - [3.3 Analytical Window Functions & Partitioning (`DENSE_RANK()`)](#33-analytical-window-functions--partitioning-denserank)
+   - [3.4 Recursive CTEs for Self-Referencing Document Hierarchies](#34-recursive-ctes-for-self-referencing-document-hierarchies)
 5. [Section 4: HTTP Semantics & RESTful API Architecture](#section-4-http-semantics--restful-api-architecture)
    - [4.1 HTTP Method Idempotency & Safety](#41-http-method-idempotency--safety)
    - [4.2 Precise HTTP Status Code Taxonomy](#42-precise-http-status-code-taxonomy)
@@ -207,9 +208,170 @@ VALID_TRANSITIONS = {
 
 ---
 
-## Section 2: SQL Query Optimization & Relational Modeling
+## Section 2: Relational Database Transactions & Concurrency
 
-### 2.1 Composite B-Tree Indexes & The Leftmost Prefix Rule
+### 2.1 ACID Properties & SQLAlchemy Async Transaction Management (`commit()` vs `rollback()`)
+
+Relational database transactions must satisfy the four **ACID** properties:
+- **Atomicity:** All operations within a transaction succeed or all fail together. If a document chunking process creates 10 chunks and the 10th fails, zero chunks remain in the database.
+- **Consistency:** Transactions transition the database from one valid state to another, preserving all schemas, primary keys, foreign keys (`project_id -> projects.id`), and check constraints.
+- **Isolation:** Concurrent transactions execute without cross-talk or race conditions, as if executed serially.
+- **Durability:** Once committed via `COMMIT`, updates survive crashes, power cuts, or process termination (guaranteed via Write-Ahead Logging / WAL).
+
+#### Async Transaction Lifecycle in DevPilot (`src/core/database.py`):
+```python
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI dependency yielding a managed async database session."""
+    async with async_session_factory() as session:
+        try:
+            yield session
+            await session.commit()    # 1. Emits SQL COMMIT on successful execution
+        except Exception:
+            await session.rollback()  # 2. Emits SQL ROLLBACK on unhandled exception
+            raise
+        finally:
+            await session.close()     # 3. Releases connection back to pool
+```
+
+#### Under the Hood: `await session.commit()` vs. `await session.rollback()`
+1. **`await session.commit()`:**
+   - Flushes all pending INSERT/UPDATE/DELETE statements in the SQLAlchemy identity map to the database engine.
+   - Sends the raw wire protocol `COMMIT` instruction.
+   - Clears pending dirty markers and releases transaction locks.
+2. **`await session.rollback()`:**
+   - Sends the raw wire protocol `ROLLBACK` instruction to the database engine, causing the database to revert all uncommitted modifications written during the transaction.
+   - **Crucially for SQLAlchemy:** Clears and purges the **Identity Map** (in-memory cache of entity instances). Any pending `add()`, `add_all()`, or modified entity attributes are discarded, resetting the session to a clean, pristine state.
+3. **Session Configuration Flags:**
+   ```python
+   async_session_factory = async_sessionmaker(
+       bind=engine,
+       class_=AsyncSession,
+       expire_on_commit=False,  # Attributes stay in memory across async await points
+       autoflush=False,         # Prevents premature implicit flushes before validation
+   )
+   ```
+   `expire_on_commit=False` prevents `MissingGreenlet` errors when serializing ORM models into Pydantic responses outside an active database block.
+
+---
+
+### 2.2 Database Isolation Levels & Concurrency Anomalies (Dirty, Non-Repeatable, Phantom Reads)
+
+The ANSI SQL standard defines four transaction isolation levels based on which concurrency anomalies they prevent:
+
+```
+Concurrency Anomalies Visualized:
+
+1. Dirty Read:
+   Tx 1: UPDATE projects SET status = 'DONE' (uncommitted)
+   Tx 2: SELECT status FROM projects -> Reads 'DONE'
+   Tx 1: ROLLBACK (status reverts to 'PENDING')
+   Result: Tx 2 acted on dirty data that never officially existed!
+
+2. Non-Repeatable Read (Fuzzy Read):
+   Tx 1: SELECT chunk_count FROM docs WHERE id = 1 -> Returns 5
+   Tx 2: UPDATE docs SET chunk_count = 10 WHERE id = 1; COMMIT;
+   Tx 1: SELECT chunk_count FROM docs WHERE id = 1 -> Returns 10!
+   Result: Same query within same transaction returned different values.
+
+3. Phantom Read:
+   Tx 1: SELECT COUNT(*) FROM jobs WHERE status = 'PENDING' -> Returns 2
+   Tx 2: INSERT INTO jobs (status) VALUES ('PENDING'); COMMIT;
+   Tx 1: SELECT COUNT(*) FROM jobs WHERE status = 'PENDING' -> Returns 3!
+   Result: New rows ("phantoms") appeared in a range query.
+
+4. Serialization Anomaly / Write Skew:
+   Tx 1: Reads count of documents in Project A (sees 9, limit is 10)
+   Tx 2: Reads count of documents in Project A (sees 9, limit is 10)
+   Tx 1: Inserts doc 10 and commits.
+   Tx 2: Inserts doc 11 and commits.
+   Result: Both succeeded, resulting in 11 documents and violating the limit!
+```
+
+#### Isolation Levels Matrix:
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Serialization Anomaly | Implementation Mechanism |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Read Uncommitted** | ⚠️ Possible | ⚠️ Possible | ⚠️ Possible | ⚠️ Possible | Reads raw dirty memory without locks |
+| **Read Committed** *(PostgreSQL Default)* | ❌ Prevented | ⚠️ Possible | ⚠️ Possible | ⚠️ Possible | Read snapshot generated at start of each SQL statement |
+| **Repeatable Read** | ❌ Prevented | ❌ Prevented | ❌ Prevented *(in Postgres MVCC)* | ⚠️ Possible | Read snapshot generated at start of entire transaction |
+| **Serializable** | ❌ Prevented | ❌ Prevented | ❌ Prevented | ❌ Prevented | Serializable Snapshot Isolation (SSI) or Strict 2-Phase Locking |
+
+*Key Senior Takeaway:* PostgreSQL's `Repeatable Read` prevents phantom reads under its MVCC implementation because snapshots are pinned to the transaction start time; however, it can still experience Write Skew unless `Serializable` is explicitly declared.
+
+---
+
+### 2.3 How DevPilot Prevents "Ghost Chunk" Anomalies During Background Ingestion Failures
+
+#### The Production Vulnerability ("Ghost Chunks"):
+In document RAG pipelines, background ingestion proceeds through four distinct operations:
+1. PDF/Text Extraction $\to$ 2. Sliding-Window Chunking $\to$ 3. FastEmbed Embedding Generation $\to$ 4. Database Persistence.
+
+If Step 3 (Embedding) crashes (e.g. OOM, network timeout, model deserialization failure), uncommitted `DocumentChunk` entities staged in SQLAlchemy's session identity map will linger in memory. If the application catches the error and attempts to update `job.status = FAILED` using `session.commit()` on the *same dirty session*, SQLAlchemy will **flush the partial chunks along with the job status**, creating orphaned **"ghost chunks"** that pollute downstream vector search!
+
+#### DevPilot's Rollback Isolation Architecture (`src/services/ingestion/pipeline.py`):
+```python
+# ── Phase 1: Mark Job PROCESSING in dedicated session ────────────────────────
+async with factory() as session:
+    job = await session.get(ProcessingJob, job_uuid)
+    job.status = JobStatus.PROCESSING
+    job.started_at = datetime.now(timezone.utc)
+    await session.commit()
+
+# ── Phase 2: Ingestion Workhorse with Rollback Isolation ──────────────────────
+async with factory() as session:
+    try:
+        text = await extract_text_from_file(...)
+        chunks = chunk_text(text, chunk_size=512, chunk_overlap=64)
+        embeddings = await embedding_service.generate_embeddings(...)
+        
+        # Stage chunk records in identity map
+        db_chunks = [DocumentChunk(...) for i, chunk in enumerate(chunks)]
+        session.add_all(db_chunks)
+
+        job.status = JobStatus.COMPLETED
+        await session.commit()  # Atomically commits all chunks + COMPLETED state
+
+    except Exception as exc:
+        logger.exception("Ingestion failed: %s", exc)
+        # CRITICAL: 1. Abort transaction and purge all uncommitted chunks!
+        await session.rollback()
+
+        # 2. Re-acquire fresh entity in isolated recovery block
+        try:
+            failed_job = await session.get(ProcessingJob, job_uuid)
+            if failed_job:
+                failed_job.status = JobStatus.FAILED
+                failed_job.error_message = f"{type(exc).__name__}: {str(exc)[:1000]}"
+                failed_job.completed_at = datetime.now(timezone.utc)
+                await session.commit()  # Commits ONLY the failure state
+        except Exception as inner_exc:
+            logger.error("Failed to persist failure status: %s", inner_exc)
+        raise
+```
+
+#### Why This Guarantees Zero Ghost Chunks:
+1. `await session.rollback()` explicitly sends a `ROLLBACK` wire command, aborting the active SQL transaction.
+2. SQLAlchemy wipes all staged `DocumentChunk` entities from the identity map.
+3. The subsequent `session.get(ProcessingJob, job_uuid)` starts with an empty, pristine state buffer.
+4. Calling `await session.commit()` in the recovery block flushes **only** the `FAILED` status and diagnostic error trace.
+5. Result: The database chunks table contains **0 records** for the failed document. Vector and BM25 indices remain 100% clean.
+
+---
+
+### 2.4 Concurrency Engines: PostgreSQL MVCC vs. SQLite WAL File Locking
+
+| Concurrency Dimension | PostgreSQL 16 (Production) | SQLite (Local Edge / Testing) |
+| :--- | :--- | :--- |
+| **Engine Architecture** | Multi-process client-server with connection pooling | In-process embedded serverless database |
+| **Concurrency Model** | **MVCC (Multi-Version Concurrency Control)**: Tuple versions tagged with `xmin`/`xmax`. Readers do not block writers; writers do not block readers. | **WAL Mode (Write-Ahead Logging)**: Single writer, concurrent readers. Readers read from database file and WAL; writer appends to WAL. |
+| **Locking Granularity** | Row-level locks (`SELECT FOR UPDATE`), Table locks (`ACCESS EXCLUSIVE`) | File-level locking (`SQLITE_BUSY` when multiple writers contend) |
+| **Connection Pooling** | Managed pool (`pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`) | NullPool / StaticPool (avoids thread lock contention on file handles) |
+| **Garbage Collection** | Background `VACUUM` daemon reclaims dead tuple disk space | `PRAGMA wal_checkpoint` merges WAL changes back into primary `.db` file |
+
+---
+
+## Section 3: SQL Query Optimization & Relational Modeling
+
+### 3.1 Composite B-Tree Indexes & The Leftmost Prefix Rule
 
 #### The Rule:
 A composite B-Tree index on columns $(A, B, C)$ can serve queries filtering on:
@@ -240,7 +402,7 @@ LIMIT 20;
 
 ---
 
-### 2.2 Covering Indexes & Index Range Scans
+### 3.2 Covering Indexes & Index Range Scans
 
 #### Concept:
 A query is **covered** by an index if all requested columns exist inside the B-Tree index nodes, allowing the database engine to return data directly from the index without reading the underlying heap/table pages (**Index-Only Scan**).
@@ -259,7 +421,7 @@ The query planner satisfies this entirely from the index tree leaf nodes in $O(K
 
 ---
 
-### 2.3 Analytical Window Functions & Partitioning
+### 3.3 Analytical Window Functions & Partitioning (`DENSE_RANK()`)
 
 #### Concept:
 Window functions calculate aggregate values over a partition of rows without collapsing the result set like `GROUP BY`.
@@ -287,7 +449,7 @@ FROM processing_jobs;
 
 ---
 
-### 2.4 Recursive CTEs for Self-Referencing Document Hierarchies
+### 3.4 Recursive CTEs for Self-Referencing Document Hierarchies
 
 #### Syntax Anatomy:
 ```sql
@@ -306,70 +468,6 @@ WITH RECURSIVE TreeCTE AS (
 SELECT * FROM TreeCTE ORDER BY depth DESC;
 ```
 - **Execution Lifecycle:** The engine seeds working table with the Anchor Member, joins the Recursive Member iteratively until the working table is empty, and performs a final `UNION ALL`.
-
----
-
-## Section 3: Database Transactions, Concurrency & ACID Guarantees
-
-### 3.1 ANSI SQL Transaction Isolation Levels & Concurrency Anomalies
-
-Transactions must satisfy **ACID**: Atomicity, Consistency, Isolation, Durability.
-
-```
-Anomalies:
-1. Dirty Read       : Transaction A reads uncommitted changes from Transaction B.
-2. Non-Repeatable   : Transaction A re-reads a row and finds values modified by Transaction B.
-3. Phantom Read     : Transaction A re-runs a range query and finds new rows added by Transaction B.
-4. Write Skew       : Two concurrent transactions read overlapping state and write non-conflicting
-                      updates that jointly violate a business invariant.
-```
-
-| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Write Skew | Implementation Mechanism |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **Read Uncommitted** | Possible | Possible | Possible | Possible | Read without locks |
-| **Read Committed** *(PostgreSQL Default)* | ❌ Prevented | Possible | Possible | Possible | Read snapshot at query start |
-| **Repeatable Read** | ❌ Prevented | ❌ Prevented | ❌ Prevented *(in Postgres MVCC)* | Possible | Read snapshot at transaction start |
-| **Serializable** | ❌ Prevented | ❌ Prevented | ❌ Prevented | ❌ Prevented | Strict 2-Phase Locking (S2PL) or SSI |
-
----
-
-### 3.2 Transaction Rollback Boundaries & Ghost Chunk Prevention
-
-#### The Problem:
-In background document ingestion, text extraction, chunking, embedding, and SQL inserts occur in sequence. If embedding generation times out halfway, what happens to staged chunk entities?
-
-```
-[FastAPI Background Worker]
-            │
-            ▼
-   async with factory() as session:
-       try:
-           chunks = chunk_text(...)
-           embeddings = await generate_embeddings(...)
-           session.add_all(db_chunks)  <── Staged in SQLAlchemy Identity Map!
-           await session.commit()
-       except Exception:
-           await session.rollback()    <── PURGES identity map and transaction log!
-           # Record FAILED state in separate clean transaction
-```
-
-#### Why `await session.rollback()` is Critical:
-- SQLAlchemy tracks objects in memory via an **Identity Map**.
-- Calling `session.add_all(db_chunks)` marks those entities as dirty/pending.
-- If an exception occurs and the developer catches it without calling `rollback()`, any subsequent query or commit will **flush the dirty chunks to disk**, creating orphaned "ghost chunks" belonging to a failed document.
-- `await session.rollback()` sends an explicit `ROLLBACK` to the database engine and purges the session cache.
-
----
-
-### 3.3 PostgreSQL MVCC vs. SQLite File Locking & Concurrency
-
-1. **PostgreSQL Multi-Version Concurrency Control (MVCC):**
-   - Updates and deletes do not overwrite data in-place; they create a new tuple version with `xmin` (creation transaction ID) and `xmax` (deletion transaction ID).
-   - **Readers never block writers, and writers never block readers.**
-   - Dead tuples are reclaimed asynchronously via `VACUUM`.
-2. **SQLite File-Level Locking:**
-   - In standard rollback journal mode, writing locks the entire database file (`SQLITE_BUSY`).
-   - DevPilot enables **WAL (Write-Ahead Logging)** mode for SQLite, which allows concurrent readers alongside a single writer.
 
 ---
 
