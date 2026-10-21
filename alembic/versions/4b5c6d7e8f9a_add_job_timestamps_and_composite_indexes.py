@@ -19,24 +19,44 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # 1. Add started_at and completed_at to processing_jobs
-    op.add_column('processing_jobs', sa.Column('started_at', sa.DateTime(timezone=True), nullable=True))
-    op.add_column('processing_jobs', sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True))
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
 
-    # 2. Composite indexes on processing_jobs
-    op.create_index('ix_processing_jobs_project_status_created', 'processing_jobs', ['project_id', 'status', 'created_at'], unique=False)
-    op.create_index('ix_processing_jobs_project_created', 'processing_jobs', ['project_id', 'created_at'], unique=False)
+    # 1. Add tenant_id and owner_api_key to projects if missing
+    project_cols = [c["name"] for c in inspector.get_columns("projects")]
+    if "tenant_id" not in project_cols:
+        op.add_column("projects", sa.Column("tenant_id", sa.String(length=255), nullable=True))
+        op.create_index("ix_projects_tenant_id", "projects", ["tenant_id"], unique=False)
+    if "owner_api_key" not in project_cols:
+        op.add_column("projects", sa.Column("owner_api_key", sa.String(length=255), nullable=True))
+        op.create_index("ix_projects_owner_api_key", "projects", ["owner_api_key"], unique=False)
 
-    # 3. Composite indexes on documents
-    op.create_index('ix_documents_project_created', 'documents', ['project_id', 'created_at'], unique=False)
-    op.create_index('ix_documents_project_filename', 'documents', ['project_id', 'filename'], unique=False)
+    # 2. Add started_at and completed_at to processing_jobs if missing
+    job_cols = [c["name"] for c in inspector.get_columns("processing_jobs")]
+    if "started_at" not in job_cols:
+        op.add_column("processing_jobs", sa.Column("started_at", sa.DateTime(timezone=True), nullable=True))
+    if "completed_at" not in job_cols:
+        op.add_column("processing_jobs", sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True))
 
-    # 4. Composite indexes on document_chunks
-    op.create_index('ix_document_chunks_project_document', 'document_chunks', ['project_id', 'document_id'], unique=False)
-    op.create_index('ix_document_chunks_document_index', 'document_chunks', ['document_id', 'chunk_index'], unique=False)
+    def create_index_if_missing(idx_name: str, table_name: str, columns: list[str]) -> None:
+        existing = [idx["name"] for idx in inspector.get_indexes(table_name)]
+        if idx_name not in existing:
+            op.create_index(idx_name, table_name, columns, unique=False)
 
-    # 5. Composite index on projects
-    op.create_index('ix_projects_tenant_created', 'projects', ['tenant_id', 'created_at'], unique=False)
+    # 3. Composite indexes on processing_jobs
+    create_index_if_missing("ix_processing_jobs_project_status_created", "processing_jobs", ["project_id", "status", "created_at"])
+    create_index_if_missing("ix_processing_jobs_project_created", "processing_jobs", ["project_id", "created_at"])
+
+    # 4. Composite indexes on documents
+    create_index_if_missing("ix_documents_project_created", "documents", ["project_id", "created_at"])
+    create_index_if_missing("ix_documents_project_filename", "documents", ["project_id", "filename"])
+
+    # 5. Composite indexes on document_chunks
+    create_index_if_missing("ix_document_chunks_project_document", "document_chunks", ["project_id", "document_id"])
+    create_index_if_missing("ix_document_chunks_document_index", "document_chunks", ["document_id", "chunk_index"])
+
+    # 6. Composite index on projects
+    create_index_if_missing("ix_projects_tenant_created", "projects", ["tenant_id", "created_at"])
 
 
 def downgrade() -> None:

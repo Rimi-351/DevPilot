@@ -9,9 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python dependencies into an isolated prefix
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Install python dependencies cleanly into an isolated prefix
+COPY pyproject.toml requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ── Stage 2: Final runtime stage ──────────────────────────────────────
 FROM python:3.11-slim AS runtime

@@ -62,6 +62,16 @@ class Settings(BaseSettings):
         description="Weight of normalized Hybrid RRF consensus blended into cross-encoder sigmoid probability",
     )
 
+    # Demo Mode & Evaluation Credentials
+    DEMO_MODE: bool = Field(
+        default=True,
+        description="Enable read-only demo evaluation mode",
+    )
+    DEMO_API_KEY: str = Field(
+        default="demo-readonly-key",
+        description="Dedicated API key granting read-only demo evaluation access",
+    )
+
 
 
 

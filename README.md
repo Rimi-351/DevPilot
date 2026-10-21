@@ -222,14 +222,49 @@ cp .env.example .env
 alembic upgrade head
 ```
 
-### 5. Run the Application
+### 5. Automated Sample Data Seeding
+Instantly provision a demo evaluation workspace with 3 pre-chunked, embedded sample documents:
+```bash
+python scripts/seed_demo.py
+```
+
+### 6. Read-Only Demo Mode & Evaluation Credentials
+DevPilot provides an isolated, read-only demo mode for judges and evaluators:
+- **Demo API Key:** `demo-readonly-key` (Pass header: `X-API-Key: demo-readonly-key`)
+- **Allowed Capabilities:** Semantic/hybrid search, RAG answer synthesis with citations, bounded agent workflows, and workspace inspection.
+- **Restricted Mutations:** Project creation/deletion, document uploads/mutations (HTTP 403 Forbidden).
+- Full deployment instructions and permissions matrix documented in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+### 7. Run the Application (Locally)
 ```bash
 uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### 6. Run Test Suite & Benchmark Runner
+### 8. Docker-Based Local Setup (Zero-Install Container Deployment)
+Build and run the DevPilot application container with SQLite and persistent volumes:
 ```bash
-# Run all 68 automated tests
+# Build and launch DevPilot app container
+docker compose up --build -d
+
+# Verify service health check
+curl http://localhost:8000/api/v1/health
+
+# Seed sample data inside container
+docker compose exec app python scripts/seed_demo.py
+
+# Follow container logs
+docker compose logs -f app
+
+# Run automated evaluation benchmark inside container
+docker compose exec app python -m src.evaluation.runner --top-k 3 --mock-llm
+
+# Stop container services
+docker compose down
+```
+
+### 9. Run Test Suite & Benchmark Runner
+```bash
+# Run all 86 automated tests
 pytest -v
 
 # Run the 100-query multilingual benchmark sweep

@@ -16,6 +16,7 @@ from src.core.exceptions import (
     FileTooLargeError,
     UnsupportedFileExtensionError,
 )
+from src.core.security import is_demo_api_key
 
 
 @asynccontextmanager
@@ -62,6 +63,27 @@ def create_application() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def demo_mode_guard_middleware(request: Request, call_next):
+        """Enforce read-only demo mode: permit read/inference, block write mutations for demo keys."""
+        api_key = request.headers.get("X-API-Key")
+        if api_key and is_demo_api_key(api_key):
+            if request.method not in ("GET", "HEAD", "OPTIONS"):
+                path = request.url.path
+                is_safe_inference = (
+                    path.endswith("/search")
+                    or path.endswith("/rag")
+                    or path.endswith("/agent/workflow")
+                )
+                if not is_safe_inference:
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={
+                            "detail": "Demo Mode: Write operations (create, update, delete) are disabled for demo credentials. Read-only access is granted for search, RAG, and document inspection."
+                        },
+                    )
+        return await call_next(request)
 
     @app.exception_handler(EntityNotFoundError)
     async def entity_not_found_handler(request: Request, exc: EntityNotFoundError) -> JSONResponse:

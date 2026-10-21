@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
-from src.core.security import get_current_api_key, verify_project_tenant_access
+from src.core.security import get_current_api_key, is_demo_api_key, verify_project_tenant_access
 from src.models.project import Project
 from src.schemas.common import PaginatedResponse
 from src.schemas.project import ProjectCreate, ProjectRead, ProjectUpdate
@@ -68,8 +68,17 @@ async def list_projects(
         offset = skip
         effective_limit = limit
 
-    # Filter projects for the current tenant or legacy unclaimed projects
-    tenant_filter = (Project.tenant_id == api_key) | (Project.owner_api_key == api_key) | (Project.tenant_id.is_(None))
+    # Filter projects for the current tenant or legacy unclaimed projects (or demo project if in demo mode)
+    if is_demo_api_key(api_key):
+        tenant_filter = (
+            (Project.tenant_id == api_key)
+            | (Project.owner_api_key == api_key)
+            | (Project.name == "DevPilot Evaluation Workspace")
+            | (Project.tenant_id == "devpilot-demo-key")
+            | (Project.tenant_id.is_(None))
+        )
+    else:
+        tenant_filter = (Project.tenant_id == api_key) | (Project.owner_api_key == api_key) | (Project.tenant_id.is_(None))
 
     total_query = select(func.count()).select_from(Project).where(tenant_filter)
     total_result = await db.execute(total_query)

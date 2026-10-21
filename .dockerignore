@@ -1,15 +1,37 @@
+# Virtual environment
+.venv
+venv/
+env/
+
+# Python bytecode & cache
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Version control
 .git
 .gitignore
+
+# Environment & IDE
 .env
-.pytest_cache
-.venv
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.vscode
-.idea
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# Local build, artifacts & reports
+artifacts/
+reports/
+
+# Local databases
 *.db
 *.sqlite
+*.sqlite3
+devpilot.db
+test.db
+
+# Local storage uploads
 storage/uploads/*
 !storage/uploads/.gitkeep

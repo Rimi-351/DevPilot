@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.database import async_session_factory, get_db
-from src.core.security import get_current_api_key, verify_project_tenant_access
+from src.core.security import get_current_api_key, is_demo_api_key, verify_project_tenant_access
 from src.models.document import Document
 from src.models.document_chunk import DocumentChunk
 from src.models.processing_job import JobStatus, ProcessingJob
@@ -232,11 +232,20 @@ async def list_documents(
             .order_by(Document.created_at.desc(), Document.id.asc())
         )
     else:
-        tenant_filter = (
-            (Project.tenant_id == api_key)
-            | (Project.owner_api_key == api_key)
-            | (Project.tenant_id.is_(None))
-        )
+        if is_demo_api_key(api_key):
+            tenant_filter = (
+                (Project.tenant_id == api_key)
+                | (Project.owner_api_key == api_key)
+                | (Project.name == "DevPilot Evaluation Workspace")
+                | (Project.tenant_id == "devpilot-demo-key")
+                | (Project.tenant_id.is_(None))
+            )
+        else:
+            tenant_filter = (
+                (Project.tenant_id == api_key)
+                | (Project.owner_api_key == api_key)
+                | (Project.tenant_id.is_(None))
+            )
         total_query = (
             select(func.count())
             .select_from(Document)
