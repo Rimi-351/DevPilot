@@ -5,8 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Sequence
 
-from src.services.llm import STOPWORDS
-
 
 def compute_hit_at_k(retrieved_ids: Sequence[Any], ground_truth_ids: set[Any]) -> float:
     """Compute binary Hit@k: 1.0 if at least one ground-truth ID is in retrieved_ids, else 0.0."""
@@ -153,6 +151,8 @@ def compute_unsupported_claims_rate(
     Returns:
         Float between 0.0 (all claim sentences supported by retrieved chunks) and 1.0 (all claims unsupported).
     """
+    from src.services.llm import STOPWORDS
+
     if not answer or not answer.strip() or not retrieved_chunks:
         return 0.0
 
