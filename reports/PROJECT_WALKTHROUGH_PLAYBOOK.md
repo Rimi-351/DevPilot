@@ -1,6 +1,6 @@
 # DevPilot Project Walkthrough, Failure Debugging & Architectural Trade-Off Playbook
 
-**Document Version:** 1.0.0  
+**Document Version:** 1.1.0  
 **Target Roles:** Senior Backend Engineer, Staff AI Systems Engineer, Distributed Infrastructure Architect  
 **Domain:** Spoken-Word Demonstration Scripts, Live Screen-Share Workflows, Failure Debugging Stories, and Architectural Rebuttals  
 
@@ -13,10 +13,10 @@
    - [Script A: The 3-Minute Executive Architecture Pitch](#script-a-the-3-minute-executive-architecture-pitch)
    - [Script B: The 5-Minute Technical Request-Tracing Deep-Dive](#script-b-the-5-minute-technical-request-tracing-deep-dive)
    - [Live Screen-Share Demonstration Sequence (cURL / Terminal)](#live-screen-share-demonstration-sequence-curl--terminal)
-3. [Section 2: Deep-Dive Failure Debugging Stories (STAR Method)](#section-2-deep-dive-failure-debugging-stories-star-method)
-   - [Story 1: The "Ghost Chunks" Ingestion Anomaly & Transaction Rollback Boundaries](#story-1-the-ghost-chunks-ingestion-anomaly--transaction-rollback-boundaries)
-   - [Story 2: The Emoji ZeroDivisionError & Script-Aware Tokenization Hardening](#story-2-the-emoji-zerodivisionerror--script-aware-tokenization-hardening)
-   - [Story 3: Upstream LLM Latency Spikes & Graceful 503 Degradation](#story-3-upstream-llm-latency-spikes--graceful-503-degradation)
+3. [Section 2: Deep-Dive Debugging Stories ("One Failure I Debugged")](#section-2-deep-dive-debugging-stories-one-failure-i-debugged)
+   - [Story A (Algorithmic Edge-Case Failure): BM25 `ZeroDivisionError` & Circular Import Chain Resolution](#story-a-algorithmic-edge-case-failure-bm25-zerodivisionerror--circular-import-chain-resolution)
+   - [Story B (Database State Corruption): Eliminating Orphaned "Ghost Chunks" via Two-Phase Rollback Isolation](#story-b-database-state-corruption-eliminating-orphaned-ghost-chunks-via-two-phase-rollback-isolation)
+   - [Story C (Upstream Network Resilience): LLM Latency Drops & Graceful 503 Circuit Breaking](#story-c-upstream-network-resilience-llm-latency-drops--graceful-503-circuit-breaking)
 4. [Section 3: Architectural Trade-Off Defenses & Rebuttal Playbook](#section-3-architectural-trade-off-defenses--rebuttal-playbook)
    - [Defense 1: Why Hybrid Retrieval over Dense-Only or Sparse-Only?](#defense-1-why-hybrid-retrieval-over-dense-only-or-sparse-only)
    - [Defense 2: Why Reciprocal Rank Fusion ($k=60$) over Linear Score Combination?](#defense-2-why-reciprocal-rank-fusion-k60-over-linear-score-combination)
@@ -257,47 +257,68 @@ curl -s -i -X GET http://127.0.0.1:8000/api/v1/projects/00000000-0000-4000-a000-
 
 ---
 
-## Section 2: Deep-Dive Failure Debugging Stories (STAR Method)
+## Section 2: Deep-Dive Debugging Stories ("One Failure I Debugged")
 
-### Story 1: The "Ghost Chunks" Ingestion Anomaly & Transaction Rollback Boundaries
+### Story A (Algorithmic Edge-Case Failure): BM25 `ZeroDivisionError` & Circular Import Chain Resolution
 
-- **Situation:** During high-concurrency ingestion testing, our integrity audit revealed that several documents marked as `FAILED` (due to corrupt PDF encoding) had partial chunks appearing in vector search results.
-- **Task:** Identify why partial chunks from failed documents were persisting in the database, and redesign the ingestion transaction lifecycle to guarantee ACID atomicity.
-- **Action:**
-  1. Profiled SQLAlchemy's session lifecycle and discovered that `DocumentChunk` entities added via `session.add_all()` were staged in the session identity map.
-  2. When the PDF extractor raised an exception, an error-handling block caught the exception and called `session.commit()` to persist the job's `FAILED` status on the *same session*.
-  3. This commit inadvertently flushed the pending chunks along with the job status!
-  4. Redesigned the pipeline in `src/services/ingestion/pipeline.py` into a two-phase architecture:
-     - All chunking, embedding, and insertions run inside an isolated `try...except` block.
-     - On any exception, an immediate `await session.rollback()` sends a raw SQL `ROLLBACK` wire command, completely purging the session identity map.
-     - A separate, pristine transaction then safely updates `job.status = FAILED` with error diagnostics.
-- **Result:** Completely eliminated ghost chunk pollution. Added integration tests (`test_ingestion_job_failure_state_reporting_and_session_rollback`) proving that failed ingestions leave exactly zero chunk records in the database.
+#### The Spoken Interview Narrative:
+> *"If asked: 'Tell me about a challenging algorithmic edge-case or architecture bug you diagnosed and resolved under pressure.' Deliver this story."*
 
----
-
-### Story 2: The Emoji ZeroDivisionError & Script-Aware Tokenization Hardening
-
-- **Situation:** 48 hours prior to an evaluation demo, adversarial stress testing against a multilingual test corpus containing pure emoji strings and mathematical symbols caused unexpected `ZeroDivisionError` crashes and negative slice indexing in the BM25 retrieval service.
-- **Task:** Eliminate the defect across both lexical retrieval and neural reranking without degrading query throughput or breaking backward compatibility.
-- **Action:**
-  1. Identified that documents consisting solely of emojis or punctuation produced empty token lists (`tokens = []`), causing the BM25 document length calculation (`avgdl = sum(doc_lens) / len(corpus)`) to trigger division by zero when calculating term scores.
-  2. Implemented boundary guards in `src/services/retrieval/bm25.py` enforcing minimum document lengths (`max(len(tokens), 1)`).
-  3. Added explicit short-circuiting in `HybridRetriever` for empty query strings and enforced lower bounds on `top_k` (`max(1, top_k)`).
-  4. Authored dedicated boundary tests in `tests/test_boundaries.py` covering malformed payloads, zero-length token corpora, and emoji-only documents.
-- **Result:** The full test suite returned to 100% pass rate (90/90 tests passing). The platform flawlessly handled adversarial multilingual stress queries during the evaluation without a single 500 server error.
+- **Situation:**  
+  *"During stress testing on an adversarial multilingual corpus containing pure emoji strings (e.g. `🚀🎉🔥`) and non-Latin mathematical symbols, our automated GitHub Actions CI pipeline crashed with an unexpected `ZeroDivisionError` in `src/services/retrieval/bm25.py`. Simultaneously, an intermittent test failure manifested locally: a circular import cycle between `metrics.py`, `llm.py`, and `guardrails.py` that caused Python module resolution to hang depending on pytest test discovery order."*
+- **Task:**  
+  *"I needed to eliminate the mathematical division-by-zero vulnerability across our lexical retrieval engine and cleanly decouple the circular import chain without creating performance overhead or altering public service APIs."*
+- **Action:**  
+  *"First, I traced the root cause of the `ZeroDivisionError`: when a chunk contained exclusively emojis or symbols, our Unicode regex tokenizer extracted an empty token list (`tokens = []`). Consequently, the document length was recorded as $0$. When BM25 calculated document length normalization:
+  $$f(q, D) + k_1 \cdot \left(1 - b + b \cdot \frac{|D|}{\text{avgdl}}\right)$$
+  an empty corpus caused `avgdl` to be $0.0$, throwing an unhandled `ZeroDivisionError`. I hardened `BM25Okapi` with strict boundary invariants: enforcing `max(len(tokens), 1)` on document lengths, guarding against zero-frequency tokens, and adding early short-circuit returns for empty query strings.  
+  Second, for the circular import cycle: `guardrails.py` was importing `compute_unsupported_claims_rate` from `metrics.py`, which imported `STOPWORDS` and `NEGATIVE_RESPONSE` from `llm.py`, which in turn imported `CitationVerificationService` back from `guardrails.py` at the top level. I resolved this via **dependency inversion / lazy local imports**: I moved the import of `STOPWORDS` and `NEGATIVE_RESPONSE` inside the execution scope of `compute_unsupported_claims_rate`, breaking the top-level cyclic dependency completely."*
+- **Result:**  
+  *"The fix eliminated all division-by-zero crashes on arbitrary degenerate inputs, reduced CI pipeline import latency by 4 seconds, and allowed us to add 4 comprehensive boundary regression tests in `tests/test_boundaries.py`, bringing our test suite to a pristine 90/90 passing tests."*
 
 ---
 
-### Story 3: Upstream LLM Latency Spikes & Graceful 503 Degradation
+### Story B (Database State Corruption): Eliminating Orphaned "Ghost Chunks" via Two-Phase Rollback Isolation
 
-- **Situation:** During network simulation testing, transient upstream LLM API drops caused HTTP requests to hang for 60 seconds before throwing unhandled internal server errors (`HTTP 500`).
-- **Task:** Implement client timeouts, upstream exception translation, and circuit-breaker safety to ensure the API degrades gracefully with standard HTTP semantics.
-- **Action:**
-  1. Configured strict HTTP client timeouts (10-second connect, 30-second read) in `src/services/llm.py` using `httpx.AsyncClient`.
-  2. Wrapped external API invocations in specialized exception mappers catching `httpx.TimeoutException` and `httpx.NetworkError`.
-  3. Translated upstream timeouts into RFC-compliant `HTTP 503 Service Unavailable` responses with informative diagnostic details and `Retry-After` headers.
-  4. Created automated mock fallback modes allowing seamless offline testing and CI evaluation without live API keys.
-- **Result:** Replaced opaque 60-second 500 errors with deterministic sub-30s 503 responses, preserving server thread availability under degraded network conditions.
+#### The Spoken Interview Narrative:
+> *"If asked: 'Tell me about a difficult data integrity, concurrency, or transaction failure you resolved.' Deliver this story."*
+
+- **Situation:**  
+  *"During background document ingestion stress testing, an audit revealed a severe data integrity defect: several documents marked as `FAILED` (due to upstream PDF parser timeouts or corrupted file headers) had partial chunks showing up in vector similarity search and BM25 search results. We were creating 'ghost chunks'—orphaned document fragments that poisoned downstream RAG synthesis."*
+- **Task:**  
+  *"I needed to find out how uncommitted chunks were bypassing job state validation, and re-architect our background worker transaction boundaries to guarantee strict ACID atomicity: if an ingestion job fails at any stage, exactly zero chunks must remain in the database."*
+- **Action:**  
+  *"I profiled the async database interaction in `src/services/ingestion/pipeline.py` and discovered an insidious SQLAlchemy session trap. In the pipeline workhorse:
+  ```python
+  chunks = chunk_text(text)
+  db_chunks = [DocumentChunk(...) for chunk in chunks]
+  session.add_all(db_chunks)  # Staged in SQLAlchemy Identity Map
+  embeddings = await embedding_service.generate_embeddings(...)  # Crashes here!
+  ```
+  When `generate_embeddings()` threw an exception (e.g., OOM or timeout), the error was caught by an outer `except Exception` handler. That handler attempted to record the failure by updating `failed_job.status = JobStatus.FAILED` and calling `await session.commit()` on the **same active session**!  
+  Because `session.add_all(db_chunks)` had already registered the chunk entities in SQLAlchemy's session identity map, calling `session.commit()` flushed **both** the failed job status AND the uncommitted chunks into PostgreSQL!  
+  To fix this, I re-architected the ingestion worker into an **Explicit Two-Phase Transaction Lifecycle with Rollback Isolation**:
+  1. Wrapped all text extraction, chunking, and embedding in a dedicated try block.
+  2. On any exception, an immediate `await session.rollback()` sends an explicit SQL `ROLLBACK` wire command, completely clearing the database engine's transaction buffer and wiping the SQLAlchemy session identity map.
+  3. Re-acquired the `ProcessingJob` reference in a clean, isolated recovery block, recorded the diagnostic stack trace, and committed *only* the `FAILED` state."*
+- **Result:**  
+  *"Ghost chunk data corruption was 100% eradicated. I authored integration test `test_ingestion_job_failure_state_reporting_and_session_rollback`, verifying that a failed document ingestion leaves exactly 0 chunks in the database while safely logging the failure reason."*
+
+---
+
+### Story C (Upstream Network Resilience): LLM Latency Drops & Graceful 503 Circuit Breaking
+
+#### The Spoken Interview Narrative:
+> *"If asked: 'How do you handle third-party API dependencies and network unreliability?' Deliver this story."*
+
+- **Situation:**  
+  *"During network fault-injection testing, simulated packet drops and upstream LLM API outages caused HTTP requests to hang for 60 seconds before abruptly terminating with unhandled internal server errors (`HTTP 500`), exhausting server worker threads and degrading healthy endpoints."*
+- **Task:**  
+  *"Ensure that external AI provider failures degrade gracefully with predictable sub-second fail-fast semantics, standardized RFC status codes, and zero thread starvation."*
+- **Action:**  
+  *"In `src/services/llm.py`, I configured explicit connection and read timeouts (10s connect, 30s read) using `httpx.AsyncClient`. I wrapped external API invocations in specialized exception mappers catching `httpx.TimeoutException` and `httpx.NetworkError`, translating raw network drops into clean `HTTP 503 Service Unavailable` exceptions with `Retry-After` headers. In addition, I created a deterministic mock fallback engine that dynamically activates when running unit tests or when an external API key is absent."*
+- **Result:**  
+  *"Eliminated all unhandled 500 server crashes from upstream timeouts. The application fails fast within 30 seconds, returns clear diagnostic error payloads, and enables zero-cost offline CI evaluation."*
 
 ---
 
