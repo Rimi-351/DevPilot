@@ -1,6 +1,6 @@
 # DevPilot Mock Interview & Timed Problem-Solving Master Guide
 
-**Document Version:** 1.0.0  
+**Document Version:** 1.1.0  
 **Target Roles:** Senior Backend Engineer, Staff AI Systems Engineer, Distributed Infrastructure Architect  
 **Domain:** System Design Defense, Behavioral Leadership (STAR), and Advanced Live Coding (DSA & SQL)  
 
@@ -16,13 +16,14 @@
    - [Scenario B: Scaling Under High Stakes (Mitigating Corrupted Multilingual Ingestion)](#scenario-b-scaling-under-high-stakes-mitigating-corrupted-multilingual-ingestion)
    - [Scenario C: Debugging a Critical Production Anomaly (Ghost Chunks & Transaction Boundaries)](#scenario-c-debugging-a-critical-production-anomaly-ghost-chunks--transaction-boundaries)
 3. [Timed Coding Problem-Solving: Data Structures & Algorithms](#3-timed-coding-problem-solving-data-structures--algorithms)
-   - [DSA Module 1: Trees & Hierarchical Document Parsing (Lowest Common Ancestor)](#dsa-module-1-trees--hierarchical-document-parsing-lowest-common-ancestor)
-   - [DSA Module 2: Graphs & Cycle Detection (Graph Valid Tree / Pipeline Verification)](#dsa-module-2-graphs--cycle-detection-graph-valid-tree--pipeline-verification)
-   - [DSA Module 3: Topological Sort & DAG Dependency Resolution (Kahn's Algorithm)](#dsa-module-3-topological-sort--dag-dependency-resolution-kahns-algorithm)
-   - [DSA Module 4: Binary Search on Answer Space (Capacity to Ship / Ingest within Deadline)](#dsa-module-4-binary-search-on-answer-space-capacity-to-ship--ingest-within-deadline)
-4. [Advanced Analytical SQL: Recursive CTEs & Window Functions](#4-advanced-analytical-sql-recursive-ctes--window-functions)
-   - [SQL 1: Recursive CTE for Hierarchical Document Tree & Breadcrumb Navigation](#sql-1-recursive-cte-for-hierarchical-document-tree--breadcrumb-navigation)
-   - [SQL 2: Multi-Tenant Moving Window Telemetry & Top-K Ingestion Performance](#sql-2-multi-tenant-moving-window-telemetry--top-k-ingestion-performance)
+   - [Problem 1: Trees — Lowest Common Ancestor (Binary Tree & Binary Search Tree)](#problem-1-trees--lowest-common-ancestor-binary-tree--binary-search-tree)
+   - [Problem 2: Graphs — Course Schedule I & II (Topological Sort via Kahn's Algorithm)](#problem-2-graphs--course-schedule-i--ii-topological-sort-via-kahns-algorithm)
+   - [Problem 3: Binary Search on Answer Space — Koko Eating Bananas](#problem-3-binary-search-on-answer-space--koko-eating-bananas)
+   - [Problem 4: Binary Search on Answer Space — Capacity To Ship Packages Within D Days](#problem-4-binary-search-on-answer-space--capacity-to-ship-packages-within-d-days)
+4. [Advanced Analytical SQL: Canonical Interview Questions](#4-advanced-analytical-sql-canonical-interview-questions)
+   - [SQL 1: Department Top Three Salaries (Dense Rank Partitioning)](#sql-1-department-top-three-salaries-dense-rank-partitioning)
+   - [SQL 2: Gap-and-Island Consecutive Sequence Detection (Streak Analysis)](#sql-2-gap-and-island-consecutive-sequence-detection-streak-analysis)
+   - [SQL 3: Recursive CTE for Hierarchical Document Tree & Breadcrumb Navigation](#sql-3-recursive-cte-for-hierarchical-document-tree--breadcrumb-navigation)
 5. [Timed Problem-Solving Execution Checklist](#5-timed-problem-solving-execution-checklist)
 
 ---
@@ -129,239 +130,382 @@ In senior backend interviews, coding questions evaluate your ability to select t
 
 ---
 
-### DSA Module 1: Trees & Hierarchical Document Parsing (Lowest Common Ancestor)
+### Problem 1: Trees — Lowest Common Ancestor (Binary Tree & Binary Search Tree)
 
-#### Problem Context:
-In DevPilot's document parser, documents are represented as a hierarchical tree of sections, subsections, and paragraphs. Given two chunk nodes `p` and `q`, find their Lowest Common Ancestor (LCA) to determine the enclosing parent section for context expansion.
+#### Context:
+Given two nodes `p` and `q`, find their lowest common ancestor (LCA) in a tree. Evaluates post-order DFS propagation (Binary Tree) vs. value range partitioning (BST).
 
 ```
-                  Root Document (0)
-                 /                 \
-        Section 1 (1)             Section 2 (2)
-       /             \                  \
- Subsection A (3)  Subsection B (4)   Subsection C (5)
+                  Root (3)
+                 /        \
+               (5)        (1)
+              /   \      /   \
+            (6)   (2)  (0)   (8)
+                 /   \
+               (7)   (4)
+LCA(5, 1) = 3
+LCA(5, 4) = 5
 ```
 
-#### Python Reference Implementation:
+#### Part A: Binary Tree LCA (General Case)
+- **Time Complexity:** $O(N)$ — traverses at most $N$ nodes.
+- **Space Complexity:** $O(H)$ — recursion stack depth ($H \le N$).
+
 ```python
 from __future__ import annotations
 from typing import Optional
 
 
 class TreeNode:
-    """Represents a hierarchical document section or chunk node."""
-    def __init__(self, val: int, left: Optional[TreeNode] = None, right: Optional[TreeNode] = None) -> None:
+    """Standard binary tree node."""
+    def __init__(self, val: int = 0, left: Optional[TreeNode] = None, right: Optional[TreeNode] = None) -> None:
         self.val = val
         self.left = left
         self.right = right
 
 
-def lowest_common_ancestor(
+def lowest_common_ancestor_bt(
     root: Optional[TreeNode], 
     p: TreeNode, 
     q: TreeNode
 ) -> Optional[TreeNode]:
-    """Find the Lowest Common Ancestor (LCA) of nodes p and q in a binary tree.
+    """Find the Lowest Common Ancestor (LCA) in a general Binary Tree.
     
     Invariant:
-    - If current node is None, return None.
-    - If current node is p or q, return current node (found target).
-    - Recursively search left and right subtrees.
-    - If both left and right return non-None, current node is the LCA split point!
-    - Otherwise, propagate the non-None branch.
-    
-    Time Complexity:  O(N) where N is the number of nodes in the tree.
-    Space Complexity: O(H) where H is tree height (call stack depth; O(log N) balanced, O(N) skewed).
+    - If current node is None or matches p or q, return current node.
+    - If p and q reside in opposite subtrees, current node is the LCA split point!
+    - If only one subtree returns a non-None node, propagate that node upward.
     """
     if root is None or root is p or root is q:
         return root
 
-    left = lowest_common_ancestor(root.left, p, q)
-    right = lowest_common_ancestor(root.right, p, q)
+    left = lowest_common_ancestor_bt(root.left, p, q)
+    right = lowest_common_ancestor_bt(root.right, p, q)
 
     if left is not None and right is not None:
-        return root  # p and q are in separate subtrees; root is their LCA
+        return root  # Found split point
 
     return left if left is not None else right
 ```
 
----
+#### Part B: Binary Search Tree LCA (Exploiting BST Invariant)
+- **Invariant:** For any node `root`, all nodes in `root.left` have values $< \text{root.val}$, and all nodes in `root.right` have values $> \text{root.val}$.
+- **Time Complexity:** $O(H)$ — where $H$ is the tree height ($O(\log N)$ average, $O(N)$ worst-case).
+- **Space Complexity:** $O(1)$ auxiliary space when implemented iteratively!
 
-### DSA Module 2: Graphs & Cycle Detection (Graph Valid Tree / Pipeline Verification)
-
-#### Problem Context:
-DevPilot allows users to define custom asynchronous data processing pipelines consisting of $N$ nodes labeled $0$ to $N-1$ and a list of undirected edges. Verify whether the pipeline forms a **Valid Tree** (connected graph with zero cycles).
-
-#### Mathematical Condition:
-A graph of $N$ nodes is a valid tree if and only if:
-1. It contains exactly $N - 1$ edges ($E = V - 1$).
-2. It is fully connected (a single traversal visits all $N$ nodes without cycles).
-
-#### Python Reference Implementation (Union-Find / Disjoint Set Union):
 ```python
-from __future__ import annotations
+def lowest_common_ancestor_bst(
+    root: Optional[TreeNode], 
+    p: TreeNode, 
+    q: TreeNode
+) -> Optional[TreeNode]:
+    """Find the LCA in a Binary Search Tree (BST) iteratively in O(1) space."""
+    curr = root
+    val_p, val_q = p.val, q.val
 
-
-class DSU:
-    """Disjoint Set Union with Path Compression and Union by Rank."""
-    def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
-        self.rank = [1] * n
-        self.components = n
-
-    def find(self, i: int) -> int:
-        if self.parent[i] != i:
-            self.parent[i] = self.find(self.parent[i])  # Path compression
-        return self.parent[i]
-
-    def union(self, i: int, j: int) -> bool:
-        root_i = self.find(i)
-        root_j = self.find(j)
-        if root_i == root_j:
-            return False  # Cycle detected!
-
-        # Union by rank
-        if self.rank[root_i] < self.rank[root_j]:
-            self.parent[root_i] = root_j
-        elif self.rank[root_i] > self.rank[root_j]:
-            self.parent[root_j] = root_i
+    while curr is not None:
+        # If both p and q are smaller than curr, LCA must be in the left subtree
+        if val_p < curr.val and val_q < curr.val:
+            curr = curr.left
+        # If both p and q are greater than curr, LCA must be in the right subtree
+        elif val_p > curr.val and val_q > curr.val:
+            curr = curr.right
         else:
-            self.parent[root_j] = root_i
-            self.rank[root_i] += 1
+            # We found the split point (or curr matches p or q)
+            return curr
 
-        self.components -= 1
-        return True
-
-
-def is_valid_pipeline_tree(n: int, edges: list[list[int]]) -> bool:
-    """Determine if n pipeline stages and undirected edge connections form a valid tree.
-    
-    Time Complexity:  O(N * alpha(N)) approx O(N) where alpha is the Inverse Ackermann function.
-    Space Complexity: O(N) to store parent and rank arrays.
-    """
-    # Necessary condition: A tree with N nodes must have exactly N - 1 edges
-    if len(edges) != n - 1:
-        return False
-
-    dsu = DSU(n)
-    for u, v in edges:
-        if not dsu.union(u, v):
-            return False  # Found cycle
-
-    return dsu.components == 1
+    return None
 ```
 
 ---
 
-### DSA Module 3: Topological Sort & DAG Dependency Resolution (Kahn's Algorithm)
+### Problem 2: Graphs — Course Schedule I & II (Topological Sort via Kahn's Algorithm)
 
-#### Problem Context:
-Ingestion jobs have inter-stage dependencies (e.g., OCR extraction must precede chunking, which must precede embedding generation). Given $N$ tasks and prerequisite pairs `[task, prereq]`, find a valid topological order to schedule tasks. If a cycle exists, raise an error.
+#### Context:
+There are a total of `num_courses` labeled from `0` to `num_courses - 1`. You are given an array `prerequisites` where `prerequisites[i] = [a, b]` indicates you must take course `b` before `a` ($b \to a$).
+- **Course Schedule I:** Return `True` if you can finish all courses, `False` otherwise.
+- **Course Schedule II:** Return the valid course ordering. If impossible due to a cycle, return `[]`.
 
 ```
-[0: File Ingress] ──► [1: OCR Extract] ──► [2: Chunking] ──► [3: FastEmbed]
-                                                  │
-                                                  ▼
-                                            [4: BM25 Index]
+Graph: [1, 0], [2, 0], [3, 1], [3, 2]
+    0 ──► 1 ──► 3
+    └───► 2 ───►┘
+Valid Topological Order: [0, 1, 2, 3] or [0, 2, 1, 3]
 ```
 
-#### Python Reference Implementation (Kahn's BFS Algorithm):
+#### Python Reference Implementation (Kahn's BFS In-Degree Algorithm):
+- **Time Complexity:** $O(V + E)$ where $V = \text{num\_courses}$, $E = \text{len(prerequisites)}$.
+- **Space Complexity:** $O(V + E)$ for adjacency list and in-degree counter.
+
 ```python
 from __future__ import annotations
 from collections import deque
 
 
-def schedule_pipeline_tasks(num_tasks: int, prerequisites: list[list[int]]) -> list[int]:
-    """Return valid task execution sequence using Kahn's Algorithm (BFS In-Degree).
-    
-    prerequisites[i] = [a, b] indicates task 'b' must be completed BEFORE task 'a' (b -> a).
-    
-    Time Complexity:  O(V + E) where V = num_tasks, E = len(prerequisites).
-    Space Complexity: O(V + E) for adjacency list and in-degree tracking array.
-    """
-    adj: list[list[int]] = [[] for _ in range(num_tasks)]
-    in_degree = [0] * num_tasks
+def can_finish_courses(num_courses: int, prerequisites: list[list[int]]) -> bool:
+    """Course Schedule I: Determine if all courses can be finished (DAG Cycle Detection)."""
+    order = find_course_order(num_courses, prerequisites)
+    return len(order) == num_courses
 
+
+def find_course_order(num_courses: int, prerequisites: list[list[int]]) -> list[int]:
+    """Course Schedule II: Return valid topological course order using Kahn's Algorithm.
+    
+    Returns empty list if a dependency cycle exists.
+    """
+    adj: list[list[int]] = [[] for _ in range(num_courses)]
+    in_degree = [0] * num_courses
+
+    # Build directed graph: b -> a
     for dest, src in prerequisites:
         adj[src].append(dest)
         in_degree[dest] += 1
 
-    # Queue all tasks that have 0 prerequisites (in-degree == 0)
-    queue: deque[int] = deque([i for i in range(num_tasks) if in_degree[i] == 0])
-    ordered_tasks: list[int] = []
+    # Initialize queue with all courses having 0 prerequisites (in_degree == 0)
+    queue: deque[int] = deque([course for course in range(num_courses) if in_degree[course] == 0])
+    topological_order: list[int] = []
 
     while queue:
         curr = queue.popleft()
-        ordered_tasks.append(curr)
+        topological_order.append(curr)
 
         for neighbor in adj[curr]:
             in_degree[neighbor] -= 1
             if in_degree[neighbor] == 0:
                 queue.append(neighbor)
 
-    if len(ordered_tasks) != num_tasks:
-        # Cycle detected: Not all tasks could be scheduled!
-        return []
+    # If the topological order contains all courses, no cycle exists
+    if len(topological_order) == num_courses:
+        return topological_order
 
-    return ordered_tasks
+    return []  # Cycle detected!
 ```
 
 ---
 
-### DSA Module 4: Binary Search on Answer Space (Capacity to Ship / Ingest within Deadline)
+### Problem 3: Binary Search on Answer Space — Koko Eating Bananas
 
-#### Problem Context:
-DevPilot's background worker has $N$ document batches with page counts `pages = [100, 200, 150, 400, 250]`. Batches must be processed in the given sequential order. You have a deadline of $H$ hours. Each hour, the worker can ingest at most $C$ pages. What is the **minimum hourly processing capacity $C$** required to ingest all documents within $H$ hours?
+#### Context (LeetCode 875):
+Koko loves to eat bananas. There are $N$ piles of bananas where the $i$-th pile has `piles[i]` bananas. The guards will return in $h$ hours.
+Koko can decide her eating speed $k$ (bananas per hour). Each hour, she chooses a pile and eats $k$ bananas. If the pile has less than $k$ bananas, she eats all of them and will not eat any more bananas during that hour.
+Return the **minimum integer $k$** such that she can eat all the bananas within $h$ hours.
 
 #### Monotonic Invariant:
-If capacity $C$ is sufficient to finish within $H$ hours, any capacity $C' > C$ is also sufficient. If $C$ fails, any $C'' < C$ also fails. This monotonic boolean predicate allows **Binary Search on the Answer Space**:
-- $\text{Lower Bound} = \max(\text{pages})$ (must process at least the largest single batch in one hour).
-- $\text{Upper Bound} = \sum(\text{pages})$ (processing all pages in 1 hour).
+Let $f(k)$ be the hours needed to eat all piles at speed $k$:
+$$f(k) = \sum_{p \in \text{piles}} \left\lceil \frac{p}{k} \right\rceil = \sum_{p \in \text{piles}} \left\lfloor \frac{p + k - 1}{k} \right\rfloor$$
+- As speed $k$ increases, hours needed $f(k)$ monotonically decreases.
+- Minimum possible speed: $k = 1$.
+- Maximum necessary speed: $k = \max(\text{piles})$ (she can finish each pile in $\le 1$ hour).
 
 #### Python Reference Implementation:
+- **Time Complexity:** $O(N \cdot \log(\max(\text{piles})))$ where $N = \text{len(piles)}$.
+- **Space Complexity:** $O(1)$ auxiliary space.
+
 ```python
 from __future__ import annotations
-import math
 
 
-def min_ingestion_capacity(pages: list[int], max_hours: int) -> int:
-    """Find minimum hourly page ingestion capacity C to finish within max_hours.
+def min_eating_speed(piles: list[int], h: int) -> int:
+    """Find minimum integer eating speed k to eat all bananas within h hours.
     
-    Time Complexity:  O(N * log(sum(pages) - max(pages)))
-    Space Complexity: O(1) auxiliary space.
+    Time Complexity:  O(N * log(max(piles)))
+    Space Complexity: O(1)
     """
-    if not pages or max_hours <= 0:
-        return 0
+    if not piles or h < len(piles):
+        return -1  # Impossible if hours < number of piles
 
-    def can_finish(capacity: int) -> bool:
-        hours_needed = 0
-        for p in pages:
-            # Ceiling division without floating-point inaccuracies: (p + capacity - 1) // capacity
-            hours_needed += (p + capacity - 1) // capacity
-            if hours_needed > max_hours:
-                return False
-        return hours_needed <= max_hours
+    def hours_needed_at_speed(k: int) -> int:
+        total_hours = 0
+        for p in piles:
+            # Ceiling division without floating point inaccuracies
+            total_hours += (p + k - 1) // k
+            if total_hours > h:
+                return total_hours  # Early exit optimization
+        return total_hours
 
-    low = max(pages)
-    high = sum(pages)
-    best_capacity = high
+    low = 1
+    high = max(piles)
+    min_valid_speed = high
 
     while low <= high:
         mid = low + (high - low) // 2
-        if can_finish(mid):
-            best_capacity = mid
-            high = mid - 1  # Try finding smaller valid capacity
+        if hours_needed_at_speed(mid) <= h:
+            min_valid_speed = mid  # mid is valid; try finding smaller speed
+            high = mid - 1
         else:
-            low = mid + 1   # Need more capacity
+            low = mid + 1          # mid is too slow; must increase speed
 
-    return best_capacity
+    return min_valid_speed
 ```
 
 ---
 
-## 4. Advanced Analytical SQL: Recursive CTEs & Window Functions
+### Problem 4: Binary Search on Answer Space — Capacity To Ship Packages Within D Days
 
-### SQL 1: Recursive CTE for Hierarchical Document Tree & Breadcrumb Navigation
+#### Context (LeetCode 1011):
+A conveyor belt has packages that must be shipped within `days` days. The weights of the packages are given in order by `weights[i]`. Each day, packages are loaded onto the ship in the given order, and the ship cannot be loaded with more weight than its maximum weight capacity.
+Return the **least weight capacity** of the ship that will result in all packages being shipped within `days` days.
+
+#### Monotonic Invariant:
+- Minimum possible capacity: $\max(\text{weights})$ (the ship must be able to carry the heaviest individual package).
+- Maximum necessary capacity: $\sum(\text{weights})$ (shipping all packages on day 1).
+- Monotonicity: If capacity $C$ ships all packages in $\le \text{days}$, any $C' > C$ is also valid.
+
+#### Python Reference Implementation:
+- **Time Complexity:** $O(N \cdot \log(\sum(\text{weights}) - \max(\text{weights})))$.
+- **Space Complexity:** $O(1)$ auxiliary space.
+
+```python
+from __future__ import annotations
+
+
+def ship_within_days(weights: list[int], days: int) -> int:
+    """Find least ship weight capacity to ship all packages within given days.
+    
+    Time Complexity:  O(N * log(sum(weights) - max(weights)))
+    Space Complexity: O(1)
+    """
+    if not weights or days <= 0:
+        return 0
+
+    def can_ship_with_capacity(capacity: int) -> bool:
+        days_used = 1
+        current_day_load = 0
+
+        for w in weights:
+            if current_day_load + w > capacity:
+                days_used += 1
+                current_day_load = w
+                if days_used > days:
+                    return False
+            else:
+                current_day_load += w
+
+        return days_used <= days
+
+    low = max(weights)
+    high = sum(weights)
+    ans = high
+
+    while low <= high:
+        mid = low + (high - low) // 2
+        if can_ship_with_capacity(mid):
+            ans = mid
+            high = mid - 1  # Seek smaller capacity
+        else:
+            low = mid + 1   # Capacity too small
+
+    return ans
+```
+
+---
+
+## 4. Advanced Analytical SQL: Canonical Interview Questions
+
+---
+
+### SQL 1: Department Top Three Salaries (Dense Rank Partitioning)
+
+#### Problem Context (LeetCode 185):
+A company's executives are interested in seeing who earns the most money in each department. A high earner in a department is an employee who has a salary in the **top three unique salaries** for that department.
+Given schemas:
+- `Employee(id, name, salary, departmentId)`
+- `Department(id, name)`
+
+Find the employees who are high earners in each of the departments.
+
+#### SQL Solution:
+```sql
+WITH RankedSalaries AS (
+    SELECT 
+        d.name AS Department,
+        e.name AS Employee,
+        e.salary AS Salary,
+        DENSE_RANK() OVER (
+            PARTITION BY e.departmentId 
+            ORDER BY e.salary DESC
+        ) AS salary_rank
+    FROM Employee e
+    JOIN Department d ON e.departmentId = d.id
+)
+SELECT 
+    Department,
+    Employee,
+    Salary
+FROM RankedSalaries
+WHERE salary_rank <= 3
+ORDER BY Department, Salary DESC;
+```
+
+#### Why `DENSE_RANK()` vs `RANK()` vs `ROW_NUMBER()`?
+- `ROW_NUMBER()` assigns sequential integers ($1, 2, 3, 4$). If two employees tie for 1st place ($100k, $100k), one gets rank 1 and the other gets rank 2.
+- `RANK()` leaves gaps after ties ($1, 1, 3$). If two employees tie for 1st place, the next gets rank 3, missing the 2nd unique salary bracket.
+- `DENSE_RANK()` produces contiguous ranks without gaps ($1, 1, 2, 3$). Both ties get rank 1, and the next highest salary is rank 2. This satisfies the requirement: **"top three unique salaries"**.
+
+---
+
+### SQL 2: Gap-and-Island Consecutive Sequence Detection (Streak Analysis)
+
+#### Problem Context:
+Given a table of user activity or document ingestion events:
+`user_activity(user_id, activity_date)`
+Find the start date, end date, and duration of all **consecutive active streaks** (consecutive days of activity) for each user.
+
+#### The "Difference of Row Numbers" Invariant:
+If dates are strictly consecutive ($D_1, D_1+1, D_1+2$), and we assign a sequential integer `ROW_NUMBER()` ($1, 2, 3$), then the difference:
+$$\text{activity\_date} - \text{ROW\_NUMBER}() \times \text{INTERVAL '1 day'}$$
+produces a **constant anchor date** for every date in the same consecutive island!
+
+```
+Date         Row_Num    Date - Row_Num (Island Group Anchor)
+2026-10-01      1       2026-09-30  <── Island 1
+2026-10-02      2       2026-09-30  <── Island 1
+2026-10-03      3       2026-09-30  <── Island 1
+2026-10-05      4       2026-10-01  <── Island 2 (Gap detected!)
+2026-10-06      5       2026-10-01  <── Island 2
+```
+
+#### SQL Solution:
+```sql
+WITH DistinctActivities AS (
+    -- Deduplicate same-day multiple events
+    SELECT DISTINCT 
+        user_id, 
+        CAST(activity_date AS DATE) AS act_date
+    FROM user_activity
+),
+NumberedEvents AS (
+    SELECT 
+        user_id,
+        act_date,
+        ROW_NUMBER() OVER (
+            PARTITION BY user_id 
+            ORDER BY act_date ASC
+        ) AS rn
+    FROM DistinctActivities
+),
+IslandGroups AS (
+    SELECT 
+        user_id,
+        act_date,
+        -- Group identifier: Date minus row number remains constant for consecutive days
+        act_date - (rn * INTERVAL '1 day') AS island_id
+    FROM NumberedEvents
+)
+SELECT 
+    user_id,
+    MIN(act_date) AS streak_start_date,
+    MAX(act_date) AS streak_end_date,
+    COUNT(*) AS streak_length_days
+FROM IslandGroups
+GROUP BY user_id, island_id
+HAVING COUNT(*) >= 1
+ORDER BY user_id, streak_start_date ASC;
+```
+
+---
+
+### SQL 3: Recursive CTE for Hierarchical Document Tree & Breadcrumb Navigation
 
 #### Problem Statement:
 In DevPilot's enterprise workspace, documents are organized in a self-referencing hierarchical folder structure:
@@ -402,51 +546,6 @@ SELECT
     depth
 FROM document_hierarchy
 ORDER BY depth DESC;
-```
-
----
-
-### SQL 2: Multi-Tenant Moving Window Telemetry & Top-K Ingestion Performance
-
-#### Problem Statement:
-For tenant operational analytics, write a single performant SQL query across `processing_jobs` to compute:
-1. The rank of each job within its project ordered by duration (`DENSE_RANK()`).
-2. A 3-job moving average of processing duration per project (`AVG(...) OVER ... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW`).
-3. Total cumulative chunks processed per project up to each job.
-
-```sql
-SELECT 
-    pj.project_id,
-    pj.id AS job_id,
-    pj.status,
-    pj.created_at,
-    -- Compute duration in seconds
-    ROUND(CAST(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at)) AS NUMERIC), 2) AS duration_seconds,
-    
-    -- Window Function 1: Rank job speed within project
-    DENSE_RANK() OVER (
-        PARTITION BY pj.project_id 
-        ORDER BY EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at)) ASC
-    ) AS speed_rank_in_project,
-
-    -- Window Function 2: 3-Job Moving Average Duration (Current + 2 Preceding)
-    ROUND(AVG(EXTRACT(EPOCH FROM (pj.completed_at - pj.started_at))) OVER (
-        PARTITION BY pj.project_id 
-        ORDER BY pj.created_at ASC 
-        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
-    )::NUMERIC, 2) AS moving_avg_duration_sec,
-
-    -- Window Function 3: Running cumulative sum of chunks processed
-    SUM(COALESCE((pj.result->>'chunks_count')::INTEGER, 0)) OVER (
-        PARTITION BY pj.project_id 
-        ORDER BY pj.created_at ASC 
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS cumulative_chunks_processed
-
-FROM processing_jobs pj
-WHERE pj.status = 'COMPLETED'
-  AND pj.created_at >= NOW() - INTERVAL '30 days'
-ORDER BY pj.project_id, pj.created_at DESC;
 ```
 
 ---
