@@ -107,6 +107,37 @@
         .animate-subtle-pulse {
             animation: pulse-subtle 3s infinite ease-in-out;
         }
+
+        /* Custom Select & Option Styling for Sleek Dark Mode */
+        select {
+            background-color: #121721;
+            color: #f3f4f6;
+            border: 1px solid #30363d;
+            border-radius: 0.75rem;
+            padding: 0.35rem 0.75rem;
+            outline: none;
+            transition: all 0.2s ease-in-out;
+            cursor: pointer;
+        }
+        select:hover {
+            border-color: #484f58;
+            background-color: #161b24;
+        }
+        select:focus {
+            border-color: #2ecc71;
+            box-shadow: 0 0 0 2px rgba(46, 204, 113, 0.25);
+        }
+        select option {
+            background-color: #121721;
+            color: #f3f4f6;
+            padding: 0.5rem 0.75rem;
+            border: none;
+        }
+        select option:checked,
+        select option:hover {
+            background-color: #1c222d;
+            color: #2ecc71;
+        }
     </style>
 </head>
 <body class="min-h-screen flex flex-col justify-between selection:bg-emerald-DEFAULT selection:text-black">
@@ -139,7 +170,7 @@
                 <span id="backendStatusText" class="text-slate-300 font-medium">Backend Online</span>
                 <span class="text-slate-600">|</span>
                 <span class="text-slate-400">Workspace:</span>
-                <select id="headerWorkspaceSelect" class="bg-transparent text-emerald font-semibold focus:outline-none cursor-pointer max-w-[160px] truncate">
+                <select id="headerWorkspaceSelect" class="bg-[#121721] text-[#f3f4f6] font-semibold text-xs border border-[#30363d] rounded-lg px-2.5 py-1 focus:outline-none focus:border-emerald cursor-pointer max-w-[170px] truncate">
                     <option value="" disabled selected>লোড হচ্ছে...</option>
                 </select>
             </div>
@@ -216,7 +247,7 @@
 
                         <!-- Retrieval Mode Dropdown -->
                         <div class="relative">
-                            <select id="retrievalModeSelect" class="bg-[#161b24] hover:bg-[#1c222d] text-slate-300 text-xs font-medium py-1.5 px-2.5 rounded-xl border border-[#262c36] focus:outline-none focus:border-emerald cursor-pointer transition-all">
+                            <select id="retrievalModeSelect" class="bg-[#121721] hover:bg-[#161b24] text-[#f3f4f6] text-xs font-medium py-1.5 px-2.5 rounded-xl border border-[#30363d] focus:outline-none focus:border-emerald cursor-pointer transition-all">
                                 <option value="hybrid_rerank" selected>বাংলা ⌄ (Rerank)</option>
                                 <option value="hybrid">Fast Hybrid (8ms)</option>
                                 <option value="vector_only">Vector Only</option>
@@ -397,7 +428,7 @@
             <form id="uploadDocForm" onsubmit="handleDocumentUpload(event)" class="space-y-4">
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 mb-1.5">টার্গেট ওয়ার্কস্পেস / প্রজেক্ট</label>
-                    <select id="uploadProjectSelect" class="w-full bg-[#161b24] border border-[#262c36] rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald">
+                    <select id="uploadProjectSelect" class="w-full bg-[#121721] border border-[#30363d] rounded-xl px-3 py-2 text-sm text-[#f3f4f6] focus:outline-none focus:border-emerald">
                         <!-- Populated dynamically -->
                     </select>
                 </div>
