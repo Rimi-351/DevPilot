@@ -23,3 +23,12 @@ async def test_health_check_endpoint(client: AsyncClient) -> None:
     assert data["status"] == "healthy"
     assert data["database"] == "connected"
     assert data["service"] == "DevPilot"
+
+
+@pytest.mark.asyncio
+async def test_ui_dashboard_endpoint(client: AsyncClient) -> None:
+    """Test web dashboard UI endpoint and HTML response."""
+    response = await client.get("/ui")
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "")
+    assert "DevPilot" in response.text

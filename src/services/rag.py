@@ -167,6 +167,8 @@ class RagService:
                     filename=c.get("filename") or "unknown",
                     start_offset=start_off if start_off is not None else 0,
                     end_offset=end_off if end_off is not None else 0,
+                    content=c.get("content"),
+                    score=float(c.get("score")) if c.get("score") is not None else None,
                 )
             )
 

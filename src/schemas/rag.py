@@ -44,6 +44,8 @@ class Citation(BaseModel):
     filename: str = Field(..., description="Original filename of the source document")
     start_offset: int = Field(..., description="Starting character offset in source document")
     end_offset: int = Field(..., description="Ending character offset in source document")
+    content: str | None = Field(default=None, description="Excerpt content of the cited chunk")
+    score: float | None = Field(default=None, description="Relevance or retrieval score")
 
 
 class RagResponse(BaseModel):

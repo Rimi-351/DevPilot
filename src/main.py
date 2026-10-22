@@ -29,31 +29,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await engine.dispose()
 
 
-class DevPilotFastAPI(FastAPI):
-    """FastAPI subclass providing flattened routes inspection for test and tooling compatibility."""
+from pathlib import Path
+from typing import Any
 
-    @property
-    def routes(self):
-        flat = []
-        for r in self.router.routes:
-            if hasattr(r, "effective_route_contexts"):
-                for rc in r.effective_route_contexts():
-                    flat.append(rc)
-            else:
-                flat.append(r)
-        return flat
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+STATIC_DIR = Path(__file__).parent / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
 
 
 def create_application() -> FastAPI:
     """Instantiate and configure the FastAPI application."""
-    app = DevPilotFastAPI(
+    openapi_tags = [
+        {"name": "Health", "description": "Service health check and database connectivity probe."},
+        {"name": "Projects", "description": "Multi-tenant project workspace management and lifecycle."},
+        {"name": "Documents", "description": "Document upload, parsing, and chunking pipeline."},
+        {"name": "Search", "description": "Hybrid dense-vector and BM25 sparse keyword retrieval with RRF."},
+        {"name": "RAG", "description": "Grounded question answering with cross-encoder neural reranking and citation guardrails."},
+        {"name": "Agent", "description": "Autonomous 4-phase bounded research agent FSM (SEARCH -> INSPECT -> SUMMARIZE -> PROPOSE)."},
+        {"name": "Processing Jobs", "description": "Asynchronous background document ingestion status and lifecycle."},
+        {"name": "UI", "description": "Single-Page Web UI dashboard."},
+        {"name": "Root", "description": "Root service metadata and status."},
+    ]
+
+    app = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
+        description="Production-grade multi-tenant cascading hybrid RAG platform with bounded agentic research FSM and active citation verification.",
         debug=settings.DEBUG,
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url=f"{settings.API_V1_STR}/openapi.json",
+        openapi_tags=openapi_tags,
     )
 
     # Middleware
@@ -135,13 +144,35 @@ def create_application() -> FastAPI:
     # Include Routers
     app.include_router(api_router, prefix=settings.API_V1_STR)
 
-    @app.get("/", tags=["Root"])
-    async def root() -> dict[str, str]:
+    if STATIC_DIR.exists():
+        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    @app.get("/ui", response_class=HTMLResponse, tags=["UI"], summary="Web Dashboard UI")
+    async def web_ui() -> HTMLResponse:
+        """Serve the native bilingual single-page Web UI dashboard."""
+        if INDEX_HTML.exists():
+            return HTMLResponse(content=INDEX_HTML.read_text(encoding="utf-8"))
+        return HTMLResponse(
+            content="<h1>DevPilot UI</h1><p>index.html not found.</p>",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    @app.get("/openapi.json", include_in_schema=False)
+    async def openapi_endpoint() -> JSONResponse:
+        """Direct OpenAPI schema endpoint."""
+        return JSONResponse(content=app.openapi())
+
+    @app.get("/", tags=["Root"], summary="Application root status and discovery")
+    async def root(request: Request) -> Any:
+        accept = request.headers.get("accept", "")
+        if "text/html" in accept:
+            return RedirectResponse(url="/ui")
         return {
             "service": settings.PROJECT_NAME,
             "version": settings.VERSION,
             "status": "online",
             "docs": "/docs",
+            "ui": "/ui",
         }
 
     return app
