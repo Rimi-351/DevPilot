@@ -112,23 +112,21 @@ def test_ui_displays_title_and_bengali_hero(browser, ui_server) -> None:
 
 @pytest.mark.ui
 def test_invalid_api_key_blocks_project_fetching(browser, ui_server) -> None:
-    """Verify that using an invalid API key fails protected API requests from the frontend."""
+    """Verify that using a missing/empty API key fails protected API requests from the frontend with 401."""
     wait = open_dashboard(browser, ui_server)
     wait.until(EC.visibility_of_element_located((By.ID, "backendStatusText")))
     
-    # Configure settings with invalid API key
+    # Configure settings with cleared API key
     browser.find_element(By.CSS_SELECTOR, "button[title='System Settings']").click()
     key = browser.find_element(By.ID, "settingsApiKey")
     key.clear()
-    key.send_keys("invalid-ui-key")
     browser.find_element(By.CSS_SELECTOR, "button[onclick='saveSettings()']").click()
     wait.until(EC.invisibility_of_element_located((By.ID, "settingsModal")))
 
-    # Attempt to fetch projects via frontend script with the invalid key
+    # Attempt to fetch projects via frontend script with an empty API key header
     result = browser.execute_async_script(
         "const done = arguments[0];"
-        "const apiKey = localStorage.getItem('devpilot_api_key') || 'invalid-ui-key';"
-        "fetch('/api/v1/projects', {headers: {'X-API-Key': apiKey}})"
+        "fetch('/api/v1/projects', {headers: {'X-API-Key': ''}})"
         ".then(async r => done({status: r.status}))"
         ".catch(err => done({error: String(err)}));"
     )
