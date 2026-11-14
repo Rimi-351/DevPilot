@@ -43,7 +43,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-m 'not ui'"
 markers = ["ui: Selenium browser smoke tests"]
 
 [tool.ruff]
