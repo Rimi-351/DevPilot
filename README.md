@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![SQLAlchemy 2.0 Async](https://img.shields.io/badge/SQLAlchemy-2.0%20Async-red.svg?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
 [![FastEmbed ONNX](https://img.shields.io/badge/FastEmbed-ONNX%20Runtime-orange.svg)](https://github.com/qdrant/fastembed)
-[![Tested with Pytest](https://img.shields.io/badge/Tests-90%2F90%20Passing-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
+[![Tested with Pytest](https://img.shields.io/badge/Tests-101%2F101%20Passing-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org/)
 [![Code Style: Ruff](https://img.shields.io/badge/Code%20Style-Ruff%20Clean-000000.svg)](https://github.com/astral-sh/ruff)
 [![Docker Ready](https://img.shields.io/badge/Docker-Multi--Stage%20Ready-2496ED.svg?logo=docker&logoColor=white)](docker-compose.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](LICENSE)
@@ -203,7 +203,7 @@ All endpoints (except health) require an authenticated `X-API-Key` header:
 
 ## Testing & Quality Assurance
 
-DevPilot maintains **100% test pass rate** across 90 unit, integration, boundary, and guardrail tests:
+DevPilot maintains **100% test pass rate** across 101 unit, integration, boundary, security, and headless Selenium UI smoke tests:
 
 ```bash
 # 1. Run static analysis with Ruff
@@ -214,9 +214,6 @@ python -m pytest -v
 
 # 3. Run benchmark evaluation runner
 python -m src.evaluation.runner --dataset benchmarks/multilingual_gold_100.jsonl --sweep --mock-llm
-```
-
----
 
 ## License
 
